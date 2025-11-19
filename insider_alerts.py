@@ -15,6 +15,8 @@ import logging
 import os
 import smtplib
 import sys
+import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -55,6 +57,11 @@ logger = logging.getLogger(__name__)
 STATE_DIR = Path("state")
 STATE_DIR.mkdir(exist_ok=True)
 STATE_FILE = STATE_DIR / "seen_alerts.json"
+
+# Database for Congressional trades
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+DB_FILE = DATA_DIR / "congressional_trades.db"
 
 # Configuration from environment
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -144,6 +151,164 @@ class InsiderAlert:
         return f"{self.signal_type}_{trade_str}"
 
 
+# ============================================================================
+# Database Functions for Congressional Trades
+# ============================================================================
+
+@contextmanager
+def get_db():
+    """Context manager for database connections"""
+    conn = sqlite3.connect(str(DB_FILE))
+    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+def init_database():
+    """
+    Initialize SQLite database with schema for Congressional trades.
+    Creates tables if they don't exist.
+    """
+    with get_db() as conn:
+        # Main trades table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS congressional_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                politician_name TEXT NOT NULL,
+                politician_id TEXT,
+                party TEXT,
+                chamber TEXT,
+                state TEXT,
+                ticker TEXT NOT NULL,
+                company_name TEXT,
+                trade_type TEXT NOT NULL,
+                size_range TEXT,
+                price REAL,
+                traded_date TEXT NOT NULL,
+                published_date TEXT NOT NULL,
+                filed_after_days INTEGER,
+                owner_type TEXT,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(politician_name, ticker, traded_date, trade_type, size_range)
+            )
+        """)
+        
+        # Politician ID mapping cache
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS politician_ids (
+                politician_name TEXT PRIMARY KEY,
+                politician_id TEXT NOT NULL,
+                party TEXT,
+                chamber TEXT,
+                state TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Future: Politician performance stats
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS politician_stats (
+                politician_name TEXT PRIMARY KEY,
+                total_trades INTEGER DEFAULT 0,
+                total_buys INTEGER DEFAULT 0,
+                total_sells INTEGER DEFAULT 0,
+                most_traded_ticker TEXT,
+                last_trade_date TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create indices for faster queries
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON congressional_trades(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_traded_date ON congressional_trades(traded_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON congressional_trades(scraped_at)")
+        
+        conn.commit()
+    
+    logger.info(f"Database initialized at {DB_FILE}")
+
+def get_last_scrape_time() -> Optional[datetime]:
+    """Get timestamp of most recent scrape"""
+    try:
+        with get_db() as conn:
+            result = conn.execute("SELECT MAX(scraped_at) FROM congressional_trades").fetchone()
+            if result[0]:
+                return datetime.fromisoformat(result[0])
+    except:
+        return None
+    return None
+
+def get_ticker_trades_from_db(ticker: str, limit: int = 50) -> List[Dict]:
+    """Query database for Congressional trades on a specific ticker"""
+    try:
+        with get_db() as conn:
+            rows = conn.execute("""
+                SELECT * FROM congressional_trades 
+                WHERE ticker = ? 
+                ORDER BY traded_date DESC 
+                LIMIT ?
+            """, (ticker, limit)).fetchall()
+            
+            # Convert to dict format matching current code expectations
+            trades = []
+            for row in rows:
+                trades.append({
+                    'politician': row['politician_name'],
+                    'party': row['party'],
+                    'chamber': row['chamber'],
+                    'state': row['state'],
+                    'ticker': row['ticker'],
+                    'type': row['trade_type'],
+                    'size': row['size_range'],
+                    'price': f"${row['price']:.2f}" if row['price'] else "N/A",
+                    'price_numeric': row['price'],
+                    'traded_date': row['traded_date'],
+                    'published_date': row['published_date'],
+                    'filed_after_days': str(row['filed_after_days']) if row['filed_after_days'] else "N/A",
+                    'filed_after_days_numeric': row['filed_after_days'],
+                    'owner': row['owner_type'],
+                    'date': row['traded_date']  # Backwards compatibility
+                })
+            
+            return trades
+    except Exception as e:
+        logger.error(f"Error querying DB for ticker {ticker}: {e}")
+        return []
+
+def store_congressional_trade(trade: Dict) -> bool:
+    """Store a single Congressional trade in database (with deduplication)"""
+    try:
+        with get_db() as conn:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO congressional_trades 
+                (politician_name, politician_id, party, chamber, state, ticker, company_name,
+                 trade_type, size_range, price, traded_date, published_date, 
+                 filed_after_days, owner_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                trade.get('politician'),
+                trade.get('politician_id'),
+                trade.get('party'),
+                trade.get('chamber'),
+                trade.get('state'),
+                trade.get('ticker'),
+                trade.get('company_name'),
+                trade.get('type'),
+                trade.get('size'),
+                trade.get('price_numeric'),
+                trade.get('traded_date'),
+                trade.get('published_date'),
+                trade.get('filed_after_days_numeric'),
+                trade.get('owner')
+            ))
+            conn.commit()
+            return cursor.rowcount > 0  # True if new row inserted
+    except Exception as e:
+        logger.error(f"Error storing trade: {e}")
+        return False
+
+
 def get_company_context(ticker: str) -> Dict[str, any]:
     """
     Get comprehensive company context including financials, price action, and news.
@@ -223,29 +388,33 @@ def get_company_context(ticker: str) -> Dict[str, any]:
     # Get news if enabled
     if USE_NEWS_CONTEXT and NEWS_API_KEY:
         try:
-            from newsapi import NewsApiClient
+            from eventregistry import EventRegistry, QueryArticlesIter
             
-            newsapi = NewsApiClient(api_key=NEWS_API_KEY)
+            er = EventRegistry(apiKey=NEWS_API_KEY)
             
-            # Search for company news (last 7 days)
-            response = newsapi.get_everything(
-                q=f"{ticker}",
-                language='en',
-                sort_by='relevancy',
-                page_size=3,
-                from_param=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            # Search for company news using BOTH ticker symbol AND company name for relevance
+            # This prevents getting irrelevant results (e.g., "NICE" the word vs NICE the company)
+            company_name = context.get('company_name', '')
+            search_query = f'"{ticker}" stock' if company_name else ticker
+            
+            q = QueryArticlesIter(
+                keywords=search_query,
+                lang="eng",
+                dateStart=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+                dateEnd=datetime.now().strftime('%Y-%m-%d')
             )
             
-            if response.get('articles'):
-                context["news"] = [
-                    {
-                        "title": article.get("title", ""),
-                        "description": article.get("description", ""),
-                        "url": article.get("url", ""),
-                        "published_at": article.get("publishedAt", "")
-                    }
-                    for article in response['articles'][:3]
-                ]
+            articles = []
+            for article in q.execQuery(er, sortBy="rel", maxItems=3):
+                articles.append({
+                    "title": article.get("title", ""),
+                    "description": article.get("body", "")[:200] + "..." if article.get("body") else "",
+                    "url": article.get("url", ""),
+                    "published_at": article.get("dateTime", "")
+                })
+            
+            if articles:
+                context["news"] = articles
                 logger.info(f"Fetched {len(context['news'])} news articles for {ticker}")
         
         except Exception as e:
@@ -259,17 +428,417 @@ def get_company_context(ticker: str) -> Dict[str, any]:
 
 def get_congressional_trades(ticker: str = None) -> List[Dict]:
     """
-    Scrape recent Congressional trades from CapitolTrades.
-    Uses Selenium to render JavaScript content.
+    Get Congressional trades for a specific ticker.
     
-    Returns ALL recent trades (not filtered by ticker) - provides broader market context
-    about what politicians are buying/selling.
+    NEW APPROACH:
+    1. Check if we need to refresh database (>1 hour old or empty)
+    2. If refresh needed: Scrape ALL 30-day trades into SQLite
+    3. Query database for ticker-specific trades
+    4. Return filtered results
     
     Args:
-        ticker: Not used - kept for API compatibility
+        ticker: Stock ticker to filter by. If None, returns recent trades.
         
     Returns:
-        List of all recent congressional trades with politician info and tickers
+        List of congressional trades with full details
+    """
+    if not USE_CAPITOL_TRADES:
+        return []
+    
+    # Initialize database if needed
+    try:
+        init_database()
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {e}")
+        return []
+    
+    # Check if we need to refresh data (>1 hour old or empty)
+    last_scrape = get_last_scrape_time()
+    needs_refresh = (
+        last_scrape is None or 
+        (datetime.now() - last_scrape) > timedelta(hours=1)
+    )
+    
+    if needs_refresh:
+        logger.info("Congressional trades data stale or missing, refreshing from CapitolTrades...")
+        scrape_all_congressional_trades_to_db()
+    else:
+        logger.info(f"Using cached Congressional trades (last updated: {last_scrape})")
+    
+    # Query database for ticker-specific trades
+    if ticker:
+        trades = get_ticker_trades_from_db(ticker, limit=50)
+        if trades:
+            logger.info(f"Found {len(trades)} Congressional trades for {ticker} in database")
+        else:
+            logger.info(f"No Congressional trades found for {ticker}")
+        return trades
+    else:
+        # Return recent trades across all tickers
+        try:
+            with get_db() as conn:
+                rows = conn.execute("""
+                    SELECT * FROM congressional_trades 
+                    ORDER BY scraped_at DESC 
+                    LIMIT 15
+                """).fetchall()
+                
+                trades = []
+                for row in rows:
+                    trades.append({
+                        'politician': row['politician_name'],
+                        'type': row['trade_type'],
+                        'ticker': row['ticker'],
+                        'size': row['size_range'],
+                        'price': f"${row['price']:.2f}" if row['price'] else "N/A",
+                        'date': row['traded_date']
+                    })
+                return trades
+        except Exception as e:
+            logger.error(f"Error querying recent trades: {e}")
+            return []
+
+
+def scrape_all_congressional_trades_to_db(days: int = 30, max_pages: int = 10):
+    """
+    Scrape ALL Congressional trades for last N days and store in database.
+    This is the main bulk scraping function with pagination support.
+    
+    Args:
+        days: Number of days to look back (30, 90, or 365)
+        max_pages: Maximum number of pages to scrape (default 10, enough for 30 days with 96/page)
+    """
+    driver = None
+    new_trades_count = 0
+    duplicate_count = 0
+    total_pages = 0
+    
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from webdriver_manager.chrome import ChromeDriverManager
+        import time
+        
+        # Configure Chrome for headless mode
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--window-size=1920,1080')
+        chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        
+        logger.info(f"Starting bulk scrape of Congressional trades (last {days} days)...")
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(20)
+        
+        # Navigate to trades page
+        driver.get("https://www.capitoltrades.com/trades")
+        time.sleep(4)
+        
+        # Dismiss cookie banner if present
+        try:
+            cookie_buttons = driver.find_elements(By.CSS_SELECTOR, "button")
+            for btn in cookie_buttons:
+                if 'Accept' in btn.text and 'All' in btn.text:
+                    btn.click()
+                    logger.info("Dismissed cookie banner")
+                    time.sleep(1)
+                    break
+        except:
+            pass
+        
+        # Click the time filter dropdown to select timeframe
+        try:
+            dropdown = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".dropdown-selector.q-flyout--plain"))
+            )
+            dropdown.click()
+            time.sleep(1)
+            
+            # Select the appropriate timeframe option
+            timeframe_text = f"{days} DAYS" if days < 365 else "3 YEARS"
+            options = driver.find_elements(By.TAG_NAME, "button")
+            for option in options:
+                if timeframe_text in option.text.upper():
+                    option.click()
+                    logger.info(f"Selected timeframe: {timeframe_text}")
+                    time.sleep(3)
+                    break
+        except Exception as e:
+            logger.warning(f"Could not set timeframe filter: {e}. Continuing with default...")
+        
+        # Increase page size to 96 records (if available)
+        try:
+            # Scroll to bottom first to ensure element is in view
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+            
+            # Find the "show more" button with class containing "right-px"
+            show_more_buttons = driver.find_elements(By.CSS_SELECTOR, ".absolute.right-px.flex.items-center")
+            if show_more_buttons:
+                # Use JavaScript click to avoid interception
+                driver.execute_script("arguments[0].click();", show_more_buttons[0])
+                time.sleep(1)
+                
+                # Look for 96 option
+                options = driver.find_elements(By.TAG_NAME, "button")
+                for option in options:
+                    if '96' in option.text:
+                        driver.execute_script("arguments[0].click();", option)
+                        logger.info("Set page size to 96 records")
+                        time.sleep(3)
+                        break
+        except Exception as e:
+            logger.warning(f"Could not increase page size: {e}")
+        
+        # Scrape all pages (with max limit)
+        while total_pages < max_pages:
+            total_pages += 1
+            logger.info(f"Scraping page {total_pages}...")
+            
+            # Get rendered HTML
+            page_source = driver.page_source
+            soup = BeautifulSoup(page_source, 'html.parser')
+            
+            # Find all table rows
+            all_rows = soup.find_all('tr')
+            page_trades = 0
+            page_dupes = 0
+            
+            for row in all_rows:
+                try:
+                    # Extract politician name and ID
+                    politician_link = row.find('a', href=lambda x: x and '/politicians/' in str(x))
+                    if not politician_link:
+                        continue
+                    
+                    politician_name = politician_link.get_text(strip=True)
+                    politician_href = politician_link.get('href', '')
+                    politician_id = politician_href.split('/')[-1] if politician_href else None
+                    
+                    # Get row text for parsing
+                    row_text = row.get_text()
+                    
+                    # Extract party, chamber, state from politician info div
+                    party = None
+                    chamber = None
+                    state = None
+                    
+                    # Find the politician info div with party/chamber/state
+                    politician_info = row.find('div', class_='politician-info')
+                    if politician_info:
+                        info_text = politician_info.get_text()
+                        
+                        # Extract party
+                        if 'Republican' in info_text:
+                            party = "R"
+                        elif 'Democrat' in info_text:
+                            party = "D"
+                        elif 'Independent' in info_text:
+                            party = "I"
+                        
+                        # Extract chamber
+                        if 'House' in info_text:
+                            chamber = "House"
+                        elif 'Senate' in info_text:
+                            chamber = "Senate"
+                        
+                        # Extract state - look for state code spans
+                        import re
+                        state_span = politician_info.find('span', class_=re.compile('us-state'))
+                        if state_span:
+                            state = state_span.get_text(strip=True).upper()[:2]
+                    
+                    # Determine transaction type
+                    trade_type = None
+                    if 'buy' in row_text.lower() and 'sell' not in row_text.lower():
+                        trade_type = 'BUY'
+                    elif 'sell' in row_text.lower():
+                        trade_type = 'SELL'
+                    
+                    if not trade_type:
+                        continue
+                    
+                    # Extract ticker from span
+                    ticker_found = None
+                    ticker_span = row.find('span', class_='issuer-ticker')
+                    if ticker_span:
+                        ticker_text = ticker_span.get_text(strip=True)
+                        ticker_match = re.search(r'([A-Z]{1,5}):(?:US|NYSE|NASDAQ)', ticker_text)
+                        if ticker_match:
+                            ticker_found = ticker_match.group(1)
+                    
+                    if not ticker_found:
+                        continue
+                    
+                    # Extract company name
+                    company_name = None
+                    issuer_link = row.find('a', href=lambda x: x and '/issuers/' in str(x))
+                    if issuer_link:
+                        company_name = issuer_link.get_text(strip=True)
+                    
+                    # Extract dates, size, price, owner from cells
+                    cells = row.find_all('td')
+                    published_date = None
+                    traded_date = None
+                    filed_after_days = None
+                    owner_type = None
+                    size_range = None
+                    price_numeric = None
+                    
+                    from datetime import datetime
+                    today_str = datetime.now().strftime("%d %b")
+                    
+                    for cell in cells:
+                        cell_text = cell.get_text(strip=True)
+                        
+                        # Match published date - if it contains time (HH:MM), it's today
+                        if not published_date:
+                            time_match = re.search(r'\d{1,2}:\d{2}', cell_text)
+                            if time_match:
+                                published_date = today_str  # Published today
+                            elif any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                                                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                                match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
+                                if match:
+                                    published_date = match.group(1)
+                        
+                        # Match traded date (second date found)
+                        elif not traded_date:
+                            if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                                                                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
+                                match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
+                                if match:
+                                    traded_date = match.group(1)
+                        
+                        # Match "Filed After" days - look in q-value span
+                        if not filed_after_days:
+                            # Check if this cell has the reporting-gap structure
+                            gap_cell = cell.find('div', class_='cell--reporting-gap')
+                            if gap_cell:
+                                value_div = gap_cell.find('div', class_='q-value')
+                                if value_div:
+                                    try:
+                                        filed_after_days = int(value_div.get_text(strip=True))
+                                    except:
+                                        pass
+                        
+                        # Match owner type
+                        if any(owner in cell_text for owner in ['Joint', 'Child', 'Spouse', 'Undisclosed']):
+                            if 'Joint' in cell_text:
+                                owner_type = 'Joint'
+                            elif 'Child' in cell_text:
+                                owner_type = 'Child'
+                            elif 'Spouse' in cell_text:
+                                owner_type = 'Spouse'
+                            elif 'Undisclosed' in cell_text:
+                                owner_type = 'Undisclosed'
+                        
+                        # Match size range
+                        if not size_range:
+                            size_match = re.search(r'(\d+[KM][-–]\d+[KM])', cell_text, re.IGNORECASE)
+                            if size_match:
+                                size_range = size_match.group(1)
+                        
+                        # Match price
+                        if not price_numeric:
+                            price_match = re.search(r'\$(\d+(?:,\d+)?(?:\.\d{2})?)', cell_text)
+                            if price_match:
+                                try:
+                                    price_numeric = float(price_match.group(1).replace(',', ''))
+                                except:
+                                    pass
+                    
+                    # Build trade dict
+                    trade = {
+                        'politician': politician_name,
+                        'politician_id': politician_id,
+                        'party': party,
+                        'chamber': chamber,
+                        'state': state,
+                        'ticker': ticker_found,
+                        'company_name': company_name,
+                        'type': trade_type,
+                        'size': size_range,
+                        'price_numeric': price_numeric,
+                        'traded_date': traded_date or published_date,
+                        'published_date': published_date or traded_date,
+                        'filed_after_days_numeric': filed_after_days,
+                        'owner': owner_type
+                    }
+                    
+                    # Store in database (with deduplication)
+                    if store_congressional_trade(trade):
+                        new_trades_count += 1
+                        page_trades += 1
+                    else:
+                        duplicate_count += 1
+                        page_dupes += 1
+                        
+                except Exception as e:
+                    logger.debug(f"Could not parse row: {e}")
+                    continue
+            
+            logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates")
+            
+            # Stop early if we got zero trades on this page (means we're past the data)
+            if page_trades == 0 and page_dupes == 0:
+                logger.info("No trades found on this page - reached end of data")
+                break
+            
+            # Stop if we hit max pages
+            if total_pages >= max_pages:
+                logger.info(f"Reached max pages limit ({max_pages})")
+                break
+            
+            # Check if there's a next page button
+            try:
+                # Scroll to bottom to ensure pagination is visible
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(1)
+                
+                # Find the "Go to next page" link by aria-label
+                next_link = driver.find_element(By.CSS_SELECTOR, 'a[aria-label="Go to next page"]')
+                
+                if next_link and not next_link.get_attribute('disabled'):
+                    # Use JavaScript click to avoid cookie banner interception
+                    driver.execute_script("arguments[0].click();", next_link)
+                    logger.info("Navigating to next page...")
+                    time.sleep(3)
+                else:
+                    logger.info("No more pages to scrape")
+                    break
+                    
+            except Exception as e:
+                logger.info(f"Reached last page or pagination error: {e}")
+                break
+        
+        logger.info(f"Scrape complete: {new_trades_count} new trades, {duplicate_count} duplicates skipped across {total_pages} pages")
+        
+    except ImportError as e:
+        logger.error(f"Selenium not installed. Run: pip install selenium webdriver-manager")
+    except Exception as e:
+        logger.error(f"Error during bulk scrape: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except:
+                pass
+
+
+def get_congressional_trades_legacy(ticker: str = None) -> List[Dict]:
+    """
+    DEPRECATED: Old approach that scraped on-demand without database.
+    Kept for reference only.
     """
     if not USE_CAPITOL_TRADES:
         return []
@@ -302,8 +871,13 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(15)
         
-        # Visit general trades page - shows most recent trades across all stocks
-        url = "https://www.capitoltrades.com/trades"
+        # Visit trades page - filter by ticker if provided
+        if ticker:
+            url = f"https://www.capitoltrades.com/trades?txDate=all&pageSize=100&politician=all&asset={ticker}"
+            logger.info(f"Fetching Congressional trades for {ticker}...")
+        else:
+            url = "https://www.capitoltrades.com/trades"
+            logger.info(f"Fetching recent Congressional trades...")
         driver.get(url)
         
         # Wait for page to load and JavaScript to render
@@ -348,26 +922,32 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
                 else:
                     continue
                 
-                # Extract ticker symbol - look for issuer link
+                # Extract ticker symbol - look for issuer ticker span
                 ticker_found = None
-                issuer_link = row.find('a', href=lambda x: x and '/issuers/' in str(x))
-                if issuer_link:
-                    # Get ticker from the issuer text (often format: "Company Name TICK:US")
-                    issuer_text = issuer_link.get_text(strip=True)
-                    import re
-                    # Look for ticker:exchange pattern first (e.g., "MMM:US", "FI:US")
-                    ticker_match = re.search(r'([A-Z]{1,5}):(?:US|NYSE|NASDAQ)', issuer_text)
+                import re
+                
+                # New structure: <span class="q-field issuer-ticker">GOOGL:US</span>
+                ticker_span = row.find('span', class_='issuer-ticker')
+                if ticker_span:
+                    ticker_text = ticker_span.get_text(strip=True)
+                    ticker_match = re.search(r'([A-Z]{1,5}):(?:US|NYSE|NASDAQ)', ticker_text)
                     if ticker_match:
                         ticker_found = ticker_match.group(1)
-                    else:
-                        # Fall back to last sequence of caps (often the ticker at end)
-                        caps_sequences = re.findall(r'\b([A-Z]{2,5})\b', issuer_text)
-                        if caps_sequences:
-                            ticker_found = caps_sequences[-1]  # Use last one (usually the ticker)
                 
-                # Extract date, size (amount range), and price from cells
+                # Fallback: Try finding it in the row text as "TICKER:US" pattern
+                if not ticker_found:
+                    row_text_full = row.get_text()
+                    ticker_match = re.search(r'\b([A-Z]{2,5}):US\b', row_text_full)
+                    if ticker_match:
+                        ticker_found = ticker_match.group(1)
+                
+                # Extract date, size (amount range), price, and additional fields from cells
                 cells = row.find_all('td')
                 date_str = "Recent"
+                published_date = None
+                traded_date = None
+                filed_after_days = None
+                owner_type = None
                 size_range = None
                 price = None
                 
@@ -378,10 +958,30 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
                     # Match date patterns like "30 Oct", "15 Nov"
                     if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                                               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                        # Extract just the date part
+                        # Extract date - could be published or traded
                         match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
                         if match:
-                            date_str = match.group(1)
+                            if not published_date:
+                                published_date = match.group(1)
+                            elif not traded_date:
+                                traded_date = match.group(1)
+                            date_str = match.group(1)  # Keep for backwards compatibility
+                    
+                    # Match "Filed After" days (e.g., "39 days", "4 days")
+                    filed_match = re.search(r'(\d+)\s*days?', cell_text)
+                    if filed_match and not filed_after_days:
+                        filed_after_days = filed_match.group(1)
+                    
+                    # Match Owner type (Joint, Child, Spouse, Undisclosed)
+                    if any(owner in cell_text for owner in ['Joint', 'Child', 'Spouse', 'Undisclosed']):
+                        if 'Joint' in cell_text:
+                            owner_type = 'Joint'
+                        elif 'Child' in cell_text:
+                            owner_type = 'Child'
+                        elif 'Spouse' in cell_text:
+                            owner_type = 'Spouse'
+                        elif 'Undisclosed' in cell_text:
+                            owner_type = 'Undisclosed'
                     
                     # Match size patterns like "1K-15K", "100K-250K", "15K-50K", "50K-100K"
                     # Note: CapitolTrades uses en-dash (–) not regular hyphen (-)
@@ -469,7 +1069,8 @@ def get_insider_role_description(title: str) -> str:
 
 def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> str:
     """
-    Generate AI-powered insight analyzing the situation and providing actionable recommendation.
+    Generate AI-powered insight using local Llama 3 via Ollama.
+    Falls back to rule-based analysis if Ollama is unavailable.
     
     Args:
         alert: InsiderAlert object
@@ -479,6 +1080,109 @@ def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> 
     Returns:
         Detailed insight string with analysis and recommendation
     """
+    try:
+        import requests
+        
+        # Build context for LLM
+        prompt = f"""You are a senior hedge fund analyst with 15+ years experience. Analyze this insider trading signal with professional precision. DO NOT explain what the signal type means - I already know. Focus on NON-OBVIOUS insights, catalysts, and edge.
+
+SIGNAL: {alert.signal_type}
+TICKER: {alert.ticker} ({alert.company_name})
+CONFIDENCE: {confidence}/5
+
+MARKET DATA:"""
+        
+        # Add relevant context
+        if context.get("price_change_5d"):
+            prompt += f"\n• 5D: {context['price_change_5d']:+.1f}%"
+        if context.get("price_change_1m"):
+            prompt += f"\n• 1M: {context['price_change_1m']:+.1f}%"
+        if context.get("short_interest"):
+            si = context['short_interest']*100
+            prompt += f"\n• Short Interest: {si:.1f}%" + (" (SQUEEZE RISK!)" if si > 15 else "")
+        if context.get("pe_ratio"):
+            prompt += f"\n• P/E: {context['pe_ratio']:.1f}"
+        if context.get("distance_from_52w_low"):
+            prompt += f"\n• From 52W Low: +{context['distance_from_52w_low']:.1f}%"
+        
+        # Congressional alignment
+        congressional_trades = context.get("congressional_trades", [])
+        ticker = alert.ticker
+        congressional_buys = [
+            t for t in congressional_trades 
+            if t.get("type", "").upper() in ["BUY", "PURCHASE"] 
+            and t.get("ticker", "").upper() == ticker.upper()
+        ]
+        if congressional_buys:
+            politicians = [t.get('politician', 'Unknown') for t in congressional_buys[:2]]
+            prompt += f"\n• 🏛️ CONGRESSIONAL ALIGNMENT: {len(congressional_buys)} politicians buying ({', '.join(politicians)})"
+        
+        # Signal-specific details
+        if "num_insiders" in alert.details:
+            prompt += f"\n• {alert.details['num_insiders']} insiders buying simultaneously"
+            if "total_value" in alert.details:
+                prompt += f" (${alert.details['total_value']:,.0f} total)"
+        if "num_politicians" in alert.details:
+            prompt += f"\n• {alert.details['num_politicians']} politicians"
+            if alert.details.get("bipartisan"):
+                prompt += " (BIPARTISAN - both parties!)"
+        if "investor" in alert.details:
+            prompt += f"\n• Strategic buyer: {alert.details['investor']}"
+        
+        prompt += """
+
+TASK: Provide sharp, contrarian analysis in 3-4 sentences max:
+1. KEY INSIGHT: What's the non-obvious edge here? (e.g., "Insiders buying while shorts are trapped", "Congressional alignment suggests regulatory tailwind", "Dip buying at support")
+2. CATALYSTS: What could drive this higher? Be specific.
+3. RISKS: What could go wrong? One sentence.
+4. RECOMMENDATION: STRONG BUY / BUY / HOLD / WAIT (with price target or condition)
+
+Write like you're briefing a PM who will risk $1M+ on this. No fluff. No explaining basics. Sharp, actionable alpha only.
+DO NOT start with "Here's the analysis:" or any preamble. DO NOT use ** markdown. Start directly with your insight."""
+        
+        # Call Ollama API
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "llama3:latest",
+                "prompt": prompt,
+                "stream": False,
+                "options": {
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "max_tokens": 200
+                }
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            insight = result.get("response", "").strip()
+            
+            # Clean up the output
+            # Remove common prefixes the model adds
+            prefixes_to_remove = [
+                "Here's the analysis:",
+                "Here is the analysis:",
+                "Analysis:",
+                "Here's my analysis:"
+            ]
+            for prefix in prefixes_to_remove:
+                if insight.startswith(prefix):
+                    insight = insight[len(prefix):].strip()
+            
+            # Convert markdown ** to HTML <strong> tags for email
+            insight = insight.replace("**", "")
+            
+            if insight:
+                logger.info(f"Generated AI insight using Llama 3 for {alert.ticker}")
+                return insight
+    
+    except Exception as e:
+        logger.warning(f"Could not generate AI insight via Ollama: {e}. Using rule-based fallback.")
+    
+    # Fallback to rule-based analysis
     insights = []
     recommendation = "HOLD"  # Default
     reasoning = []
@@ -1568,7 +2272,7 @@ def save_seen_alerts(seen: Set[str]):
 
 def format_email_html(alert: InsiderAlert) -> str:
     """
-    Format alert as HTML email body.
+    Format alert as HTML email body with full context (matching Telegram format).
     
     Args:
         alert: InsiderAlert object
@@ -1580,85 +2284,512 @@ def format_email_html(alert: InsiderAlert) -> str:
     <html>
     <head>
         <style>
-            body {{ font-family: Arial, sans-serif; }}
-            h2 {{ color: #2c3e50; }}
-            .summary {{ background-color: #ecf0f1; padding: 15px; border-radius: 5px; margin: 20px 0; }}
-            .summary-item {{ margin: 5px 0; }}
-            table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
-            th {{ background-color: #3498db; color: white; padding: 10px; text-align: left; }}
-            td {{ border: 1px solid #ddd; padding: 8px; }}
-            tr:nth-child(even) {{ background-color: #f2f2f2; }}
-            .footer {{ margin-top: 30px; font-size: 12px; color: #7f8c8d; }}
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                max-width: 800px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }}
+            .container {{
+                background-color: white;
+                border-radius: 8px;
+                padding: 30px;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            h1 {{ 
+                color: #2c3e50;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 10px;
+                margin-top: 0;
+            }}
+            h2 {{ 
+                color: #2980b9;
+                margin-top: 25px;
+                margin-bottom: 10px;
+                font-size: 1.3em;
+            }}
+            .header {{
+                background: #ffffff;
+                color: #1a1a1a;
+                padding: 25px 20px;
+                text-align: center;
+                border-bottom: 3px solid #667eea;
+                margin-bottom: 25px;
+            }}
+            .ticker {{
+                font-size: 2.2em;
+                font-weight: 700;
+                margin: 5px 0;
+                color: #667eea;
+                letter-spacing: -0.5px;
+            }}
+            .company {{
+                font-size: 1em;
+                color: #666;
+                font-weight: 400;
+            }}
+            .signal-box {{
+                background-color: #ecf0f1;
+                padding: 15px;
+                border-radius: 5px;
+                margin: 15px 0;
+                border-left: 4px solid #3498db;
+            }}
+            .signal-item {{
+                margin: 8px 0;
+            }}
+            .trades-table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin: 15px 0;
+                font-size: 0.95em;
+            }}
+            .trades-table th {{
+                background-color: #3498db;
+                color: white;
+                padding: 12px 8px;
+                text-align: left;
+                font-weight: 600;
+            }}
+            .trades-table td {{
+                border: 1px solid #ddd;
+                padding: 10px 8px;
+            }}
+            .trades-table tr:nth-child(even) {{
+                background-color: #f9f9f9;
+            }}
+            .metric-row {{
+                display: flex;
+                justify-content: space-between;
+                margin: 10px 0;
+                padding: 10px;
+                background-color: #f8f9fa;
+                border-radius: 4px;
+            }}
+            .metric-label {{
+                font-weight: 600;
+                color: #555;
+            }}
+            .metric-value {{
+                color: #2c3e50;
+            }}
+            .positive {{ color: #27ae60; }}
+            .negative {{ color: #e74c3c; }}
+            .stars {{
+                color: #f39c12;
+                font-size: 1.2em;
+            }}
+            .ai-insight {{
+                background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+                border-left: 4px solid #667eea;
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 5px;
+            }}
+            .congressional-section {{
+                margin: 20px 0;
+            }}
+            .trade-list {{
+                list-style: none;
+                padding: 0;
+            }}
+            .trade-list li {{
+                padding: 8px;
+                margin: 5px 0;
+                background-color: #f8f9fa;
+                border-radius: 4px;
+            }}
+            .footer {{
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #ddd;
+                font-size: 0.9em;
+                color: #7f8c8d;
+                text-align: center;
+            }}
+            .link-button {{
+                display: inline-block;
+                background-color: #3498db;
+                color: white;
+                padding: 10px 20px;
+                text-decoration: none;
+                border-radius: 5px;
+                margin: 10px 0;
+            }}
+            .link-button:hover {{
+                background-color: #2980b9;
+            }}
         </style>
     </head>
     <body>
-        <h2>🚨 Insider Alert: {alert.signal_type}</h2>
-        
-        <div class="summary">
-            <div class="summary-item"><strong>Ticker:</strong> {alert.ticker}</div>
-            <div class="summary-item"><strong>Company:</strong> {alert.company_name}</div>
-            <div class="summary-item"><strong>Signal:</strong> {alert.signal_type}</div>
-            <div class="summary-item"><strong>Alert Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+        <div class="container">
+            <div class="header">
+                <div style="font-size: 1.5em;">🚨 {alert.signal_type}</div>
+                <div class="ticker">{alert.ticker}</div>
+                <div class="company">{alert.company_name}</div>
+            </div>
     """
     
-    # Add signal-specific details
-    if "num_insiders" in alert.details:
+    # Signal-specific details
+    if "num_insiders" in alert.details or "num_politicians" in alert.details:
+        # Cluster signal (corporate or Congressional)
+        num = alert.details.get('num_insiders', alert.details.get('num_politicians', 0))
         html += f"""
-            <div class="summary-item"><strong>Number of Insiders:</strong> {alert.details['num_insiders']}</div>
-            <div class="summary-item"><strong>Total Value:</strong> ${alert.details['total_value']:,.2f}</div>
-            <div class="summary-item"><strong>Window:</strong> {alert.details['window_days']} days</div>
+            <div class="signal-box">
+                <div class="signal-item"><strong>👥 Number:</strong> {num} {'insiders' if 'num_insiders' in alert.details else 'politicians'}</div>
         """
-    elif "value" in alert.details:
-        html += f"""
-            <div class="summary-item"><strong>Insider:</strong> {alert.details['insider']}</div>
-            <div class="summary-item"><strong>Title:</strong> {alert.details['title']}</div>
-            <div class="summary-item"><strong>Value:</strong> ${alert.details['value']:,.2f}</div>
-        """
-    
-    html += """
-        </div>
         
-        <h3>Trade Details</h3>
-        <table>
+        # Show all politicians for Congressional cluster buys
+        if "politicians" in alert.details:
+            politicians_list = alert.details['politicians']
+            html += f"""<div class="signal-item"><strong>👤 Politicians:</strong> {', '.join(politicians_list)}</div>"""
+        
+        if "total_value" in alert.details:
+            html += f"""<div class="signal-item"><strong>💰 Total Value:</strong> ${alert.details['total_value']:,.0f}</div>"""
+        if "window_days" in alert.details:
+            html += f"""<div class="signal-item"><strong>📅 Window:</strong> {alert.details['window_days']} days</div>"""
+        if alert.details.get("bipartisan"):
+            html += f"""<div class="signal-item"><strong>🏛️ Bipartisan:</strong> Both Democrats and Republicans</div>"""
+        html += """</div>"""
+        
+    elif "investor" in alert.details:
+        # Strategic investor
+        html += f"""
+            <div class="signal-box">
+                <div class="signal-item"><strong>🏢 Corporate Investor:</strong> {alert.details['investor']}</div>
+                <div class="signal-item"><strong>💰 Value:</strong> ${alert.details['value']:,.0f}</div>
+        """
+        if "trade_date" in alert.details:
+            html += f"""<div class="signal-item"><strong>📅 Date:</strong> {alert.details['trade_date'].strftime('%Y-%m-%d')}</div>"""
+        html += """
+                <div class="signal-item" style="margin-top:10px;">
+                    <strong>💡 Why this matters:</strong> Corporate investors signal strategic partnerships or acquisition interest. They conduct deep due diligence before investing.
+                </div>
+            </div>
+        """
+        
+    elif "politician" in alert.details:
+        # High-conviction Congressional trade
+        html += f"""
+            <div class="signal-box">
+                <div class="signal-item"><strong>👤 Politician:</strong> {alert.details['politician']}</div>
+                <div class="signal-item"><strong>📅 Date:</strong> {alert.details['date']}</div>
+                <div class="signal-item"><strong>⭐ Known Trader:</strong> Proven track record</div>
+            </div>
+        """
+        
+    elif "value" in alert.details:
+        # Single insider trade
+        html += """<div class="signal-box">"""
+        if "insider" in alert.details:
+            html += f"""<div class="signal-item"><strong>👤 Insider:</strong> {alert.details['insider']}</div>"""
+        if "title" in alert.details:
+            html += f"""<div class="signal-item"><strong>👔 Title:</strong> {alert.details['title']}</div>"""
+        html += f"""<div class="signal-item"><strong>💰 Value:</strong> ${alert.details['value']:,.0f}</div>"""
+        if "trade_date" in alert.details:
+            html += f"""<div class="signal-item"><strong>📅 Date:</strong> {alert.details['trade_date'].strftime('%Y-%m-%d')}</div>"""
+        html += """</div>"""
+    
+    # Trades table
+    html += """
+        <h2>📊 Trade Details</h2>
+        <table class="trades-table">
             <tr>
                 <th>Date</th>
-                <th>Insider</th>
-                <th>Title</th>
+                <th>Name</th>
                 <th>Type</th>
-                <th>Qty</th>
-                <th>Price</th>
-                <th>Value</th>
+                <th>Amount</th>
+                <th>Δ Own</th>
             </tr>
     """
     
-    # Add trade rows
-    for _, row in alert.trades.iterrows():
-        trade_date = row["Trade Date"].strftime('%Y-%m-%d') if pd.notna(row["Trade Date"]) else "N/A"
-        qty = f"{row['Qty']:,.0f}" if pd.notna(row['Qty']) else "N/A"
-        price = f"${row['Price']:,.2f}" if pd.notna(row['Price']) else "N/A"
-        value = f"${row['Value']:,.2f}" if pd.notna(row['Value']) else "N/A"
-        title = row.get("Title", "Unknown")
+    for _, row in alert.trades.head(5).iterrows():
+        date = row["Trade Date"].strftime('%m/%d/%Y') if pd.notna(row["Trade Date"]) else "N/A"
+        name = row['Insider Name']
+        
+        # Format name for Congressional trades
+        if '(' in name and ')' in name:
+            party_match = name.split('(')[1].split(')')[0] if '(' in name else ''
+            name_part = name.split('(')[0].strip()
+            name_parts = name_part.split()
+            if len(name_parts) >= 2:
+                name = f"{name_parts[0][0]}. {' '.join(name_parts[1:])} ({party_match})"
+        
+        # Determine transaction type from row data
+        trans_type = "Purchase"
+        if "Transaction" in row and pd.notna(row.get("Transaction")):
+            trans_str = str(row["Transaction"]).upper()
+            if "SALE" in trans_str or "SELL" in trans_str:
+                trans_type = "Sale"
+        # For Congressional trades, type might be in row text
+        row_text = str(row).upper()
+        if "SALE" in row_text or "SELL" in row_text:
+            trans_type = "Sale"
+        
+        type_color = "#27ae60" if trans_type == "Purchase" else "#e74c3c"
+        
+        # Amount column - WITHOUT Delta Own
+        value_cell = ""
+        if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
+            value_cell = str(row["Size Range"])
+            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
+                value_cell += f" @ {row['Price']}"
+        elif pd.notna(row.get('Value')) and row['Value'] > 0:
+            value_cell = f"${row['Value']:,.0f}"
+        
+        # Delta Own column - separate
+        delta_own = ""
+        if "Delta Own" in row and pd.notna(row.get("Delta Own")) and str(row["Delta Own"]).strip():
+            delta_own = str(row["Delta Own"]).strip()
         
         html += f"""
             <tr>
-                <td>{trade_date}</td>
-                <td>{row['Insider Name']}</td>
-                <td>{title}</td>
-                <td>{row['Trade Type']}</td>
-                <td>{qty}</td>
-                <td>{price}</td>
-                <td>{value}</td>
+                <td>{date}</td>
+                <td>{name[:50]}</td>
+                <td style="color:{type_color}; font-weight:500;">{trans_type}</td>
+                <td>{value_cell}</td>
+                <td style="color:#27ae60; font-weight:500;">{delta_own if delta_own else '—'}</td>
             </tr>
         """
     
+    if len(alert.trades) > 5:
+        html += f"""
+            <tr>
+                <td colspan="5" style="text-align:center; font-style:italic;">
+                    ...and {len(alert.trades) - 5} more trades
+                </td>
+            </tr>
+        """
+    
+    html += """</table>"""
+    
+    # Add company context
+    try:
+        context = get_company_context(alert.ticker)
+        
+        # Price Action with chart
+        if context.get("price_change_5d") is not None or context.get("price_change_1m") is not None:
+            html += "<h2>📊 Price Action</h2>"
+            
+            # Chart and price changes side by side
+            html += '<table style="width:100%; border-collapse:collapse;"><tr>'
+            html += f'<td style="width:65%; vertical-align:top;"><img src="https://finviz.com/chart.ashx?t={alert.ticker}&ty=c&ta=1&p=d&s=l" alt="{alert.ticker} Chart" style="width:100%; height:auto; border:1px solid #ddd; border-radius:5px;"></td>'
+            html += '<td style="width:35%; vertical-align:top; padding-left:15px;">'
+            
+            # Price changes from yfinance
+            try:
+                import yfinance as yf
+                stock = yf.Ticker(alert.ticker)
+                hist = stock.history(period="5y")
+                if not hist.empty:
+                    current = hist['Close'].iloc[-1]
+                    
+                    timeframes = [
+                        ('1D', 1, '1-day'),
+                        ('5D', 5, '5-day'),
+                        ('1M', 21, '1-month'),
+                        ('3M', 63, '3-month'),
+                        ('6M', 126, '6-month'),
+                        ('1Y', 252, '1-year'),
+                        ('2Y', 504, '2-year'),
+                        ('5Y', 1260, '5-year')
+                    ]
+                    
+                    for label, days, desc in timeframes:
+                        if len(hist) > days:
+                            past = hist['Close'].iloc[-days-1]
+                            change = ((current - past) / past) * 100
+                            color = '#27ae60' if change > 0 else '#e74c3c'
+                            html += f'<div style="margin:8px 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>{label}:</strong> <span style="color:{color}; font-weight:600;">{change:+.1f}%</span></div>'
+            except:
+                # Fallback to context data if yfinance fails
+                if context.get("price_change_5d") is not None:
+                    change_5d = context["price_change_5d"]
+                    color = '#27ae60' if change_5d > 0 else '#e74c3c'
+                    html += f'<div style="margin:8px 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>5D:</strong> <span style="color:{color}; font-weight:600;">{change_5d:+.1f}%</span></div>'
+                if context.get("price_change_1m") is not None:
+                    change_1m = context["price_change_1m"]
+                    color = '#27ae60' if change_1m > 0 else '#e74c3c'
+                    html += f'<div style="margin:8px 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>1M:</strong> <span style="color:{color}; font-weight:600;">{change_1m:+.1f}%</span></div>'
+            
+            html += '</td></tr></table>'
+        
+        # 52-week range as boxes below chart
+        if context.get("week_52_high") and context.get("week_52_low") and context.get("current_price"):
+            html += '<table style="width:100%; border-collapse:collapse; margin-top:10px;"><tr>'
+            html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>52W High</strong><br><span style="font-size:0.9em;">${context["week_52_high"]:.2f}</span></td>'
+            html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>52W Low</strong><br><span style="font-size:0.9em;">${context["week_52_low"]:.2f}</span></td>'
+            html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>Current</strong><br><span style="font-size:0.9em;">${context["current_price"]:.2f}</span></td>'
+            if context.get("distance_from_52w_low") is not None:
+                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center;"><strong>From 52W Low</strong><br><span style="font-size:0.9em; color:#27ae60; font-weight:600;">+{context["distance_from_52w_low"]:.1f}%</span></td>'
+            else:
+                html += '<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center;"><strong>From 52W Low</strong><br><span style="font-size:0.9em;">—</span></td>'
+            html += '</tr></table>'
+        
+        # Market data
+        if context.get("market_cap") or context.get("pe_ratio") or context.get("sector") or context.get("short_interest"):
+            html += "<h2>📈 Market Data</h2>"
+            html += '<table style="width:100%; border-collapse:collapse;"><tr>'
+            
+            if context.get("sector"):
+                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>Sector</strong><br><span style="font-size:0.9em;">{context["sector"]}</span></td>'
+            if context.get("market_cap"):
+                mc_billions = context["market_cap"] / 1e9
+                border_style = "border-right:2px solid white;" if context.get("pe_ratio") or context.get("short_interest") else ""
+                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; {border_style}"><strong>Market Cap</strong><br><span style="font-size:0.9em;">${mc_billions:.1f}B</span></td>'
+            if context.get("pe_ratio"):
+                border_style = "border-right:2px solid white;" if context.get("short_interest") else ""
+                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; {border_style}"><strong>P/E Ratio</strong><br><span style="font-size:0.9em;">{context["pe_ratio"]:.1f}</span></td>'
+            if context.get("short_interest"):
+                si_pct = context["short_interest"] * 100
+                emoji = "🔥" if si_pct > 15 else ""
+                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center;"><strong>Short Interest</strong><br><span style="font-size:0.9em;">{emoji}{si_pct:.1f}%</span></td>'
+            
+            html += '</tr></table>'
+        
+        # News section
+        if context.get("news") and len(context["news"]) > 0:
+            html += "<h2>📰 Recent News</h2>"
+            html += "<ul class='trade-list'>"
+            for news_item in context["news"][:3]:
+                title = news_item.get("title", "")
+                url = news_item.get("url", "")
+                if title:
+                    if url:
+                        html += f"<li><a href='{url}' style='color:#3498db;text-decoration:none;' target='_blank'>{title}</a></li>"
+                    else:
+                        html += f"<li>{title}</li>"
+            html += "</ul>"
+        
+        # Congressional trades
+        if context.get("congressional_trades"):
+            congressional_trades = context["congressional_trades"]
+            buys = [t for t in congressional_trades if t.get("type", "").upper() in ["BUY", "PURCHASE"]]
+            sells = [t for t in congressional_trades if t.get("type", "").upper() in ["SELL", "SALE"]]
+            
+            if buys or sells:
+                html += """
+                    <div style="margin-top:20px;">
+                        <h2 style="margin-top:0;">🏛️ Congressional Market Activity</h2>
+                        <p style="font-size:0.9em; color:#666; margin-top:0; margin-bottom:15px;">Recent Congressional trades on this ticker</p>
+                        <table style="width:100%; border-collapse:collapse;"><tr>
+                """
+                
+                if buys:
+                    html += "<td style='width:50%; background:#e8f5e9; padding:20px; vertical-align:top; border-right:2px solid white;'>"
+                    html += "<h3 style='margin-top:0; color:#27ae60;'>↑ Recent Buys</h3>"
+                    for trade in buys[:10]:  # Show top 10
+                        pol = trade.get("politician", "Unknown")
+                        size = trade.get("size", "N/A")
+                        price = trade.get("price", "N/A")
+                        traded_date = trade.get("traded_date", trade.get("date", "N/A"))
+                        published_date = trade.get("published_date", trade.get("date", "N/A"))
+                        filed_after = trade.get("filed_after_days", "N/A")
+                        owner = trade.get("owner", "N/A")
+                        
+                        html += f"<div style='margin:10px 0; padding:10px; background:white; border-radius:4px; border-left:3px solid #27ae60;'>"
+                        html += f"<strong style='color:#2c3e50;'>{pol}</strong><br>"
+                        html += f"<span style='font-size:0.85em; color:#666;'>{size}"
+                        if price and price != "N/A":
+                            html += f" @ {price}"
+                        html += "</span><br>"
+                        html += f"<span style='font-size:0.8em; color:#999;'>"
+                        html += f"Traded: {traded_date} | Published: {published_date}"
+                        if filed_after and filed_after != "N/A":
+                            html += f" ({filed_after}d delay)"
+                        if owner and owner != "N/A":
+                            html += f" | Owner: {owner}"
+                        html += "</span></div>"
+                    if len(buys) > 10:
+                        html += f"<p style='text-align:center; color:#999; font-style:italic; margin-top:10px;'>...and {len(buys)-10} more purchases</p>"
+                    html += "</td>"
+                else:
+                    html += "<td style='width:50%; background:#e8f5e9; padding:20px; vertical-align:top; border-right:2px solid white; text-align:center; color:#999;'><em>No recent purchases</em></td>"
+                
+                if sells:
+                    html += "<td style='width:50%; background:#ffebee; padding:20px; vertical-align:top;'>"
+                    html += "<h3 style='margin-top:0; color:#e74c3c;'>↓ Recent Sells</h3>"
+                    for trade in sells[:10]:  # Show top 10
+                        pol = trade.get("politician", "Unknown")
+                        size = trade.get("size", "N/A")
+                        price = trade.get("price", "N/A")
+                        traded_date = trade.get("traded_date", trade.get("date", "N/A"))
+                        published_date = trade.get("published_date", trade.get("date", "N/A"))
+                        filed_after = trade.get("filed_after_days", "N/A")
+                        owner = trade.get("owner", "N/A")
+                        
+                        html += f"<div style='margin:10px 0; padding:10px; background:white; border-radius:4px; border-left:3px solid #e74c3c;'>"
+                        html += f"<strong style='color:#2c3e50;'>{pol}</strong><br>"
+                        html += f"<span style='font-size:0.85em; color:#666;'>{size}"
+                        if price and price != "N/A":
+                            html += f" @ {price}"
+                        html += "</span><br>"
+                        html += f"<span style='font-size:0.8em; color:#999;'>"
+                        html += f"Traded: {traded_date} | Published: {published_date}"
+                        if filed_after and filed_after != "N/A":
+                            html += f" ({filed_after}d delay)"
+                        if owner and owner != "N/A":
+                            html += f" | Owner: {owner}"
+                        html += "</span></div>"
+                    if len(sells) > 10:
+                        html += f"<p style='text-align:center; color:#999; font-style:italic; margin-top:10px;'>...and {len(sells)-10} more sales</p>"
+                    html += "</td>"
+                else:
+                    html += "<td style='width:50%; background:#ffebee; padding:20px; vertical-align:top; text-align:center; color:#999;'><em>No recent sales</em></td>"
+                
+                html += "</tr></table></div>"
+        
+        # Confidence Score and AI Insight
+        confidence_score, score_reason = calculate_confidence_score(alert, context)
+        stars = "⭐" * confidence_score
+        html += f"""
+            <h2>{stars} Confidence: {confidence_score}/5</h2>
+            <p style="color:#666;font-style:italic;">{score_reason}</p>
+        """
+        
+        ai_insight = generate_ai_insight(alert, context, confidence_score)
+        # Format AI insight with line breaks and bold labels for readability
+        formatted_insight = ai_insight
+        # Bold the section labels
+        formatted_insight = formatted_insight.replace("KEY INSIGHT:", "<strong>KEY INSIGHT:</strong>")
+        formatted_insight = formatted_insight.replace("CATALYSTS:", "<strong>CATALYSTS:</strong>")
+        formatted_insight = formatted_insight.replace("RISKS:", "<strong>RISKS:</strong>")
+        formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<strong>RECOMMENDATION:</strong>")
+        formatted_insight = formatted_insight.replace("STRONG BUY", "<strong>STRONG BUY</strong>")
+        formatted_insight = formatted_insight.replace(" BUY ", " <strong>BUY</strong> ")
+        formatted_insight = formatted_insight.replace(" HOLD", " <strong>HOLD</strong>")
+        formatted_insight = formatted_insight.replace(" WAIT", " <strong>WAIT</strong>")
+        # Add line breaks
+        formatted_insight = formatted_insight.replace(". ", ".<br><br>").replace("? ", "?<br><br>")
+        html += f"""
+            <div class="ai-insight">
+                <h2 style="margin-top:0;">🧠 AI Insight (Llama 3 - Local)</h2>
+                <p style="margin:0;line-height:1.6;">{formatted_insight}</p>
+            </div>
+        """
+        
+    except Exception as e:
+        logger.warning(f"Could not add context to email: {e}")
+    
+    # Footer with link
     html += f"""
-        </table>
-        
-        <p><a href="{OPENINSIDER_URL}">View on OpenInsider</a></p>
-        
-        <div class="footer">
-            <p>This alert was generated by the Insider Trading Alert System.</p>
-            <p>Alert ID: {alert.alert_id}</p>
+            <div style="text-align:center;margin:30px 0;">
+                <a href="https://openinsider.com/search?q={alert.ticker}" class="link-button">
+                    View on OpenInsider →
+                </a>
+            </div>
+            
+            <div class="footer">
+                <p><strong>ALPHA WHISPERER</strong> - Insider Trading Intelligence</p>
+                <p>Alert ID: {alert.alert_id[:16]}...</p>
+                <p style="font-size:0.85em;color:#999;">
+                    This alert combines corporate insider Form 4 filings with Congressional stock trades,
+                    delivering high-conviction signals with AI-powered analysis.
+                </p>
+            </div>
         </div>
     </body>
     </html>
@@ -1884,7 +3015,7 @@ def format_telegram_message(alert: InsiderAlert) -> str:
 
 def format_email_text(alert: InsiderAlert) -> str:
     """
-    Format alert as plain text email body.
+    Format alert as plain text email body (fallback for email clients that don't support HTML).
     
     Args:
         alert: InsiderAlert object
@@ -1893,8 +3024,8 @@ def format_email_text(alert: InsiderAlert) -> str:
         Plain text string
     """
     text = f"""
-INSIDER ALERT: {alert.signal_type}
-{'=' * 60}
+🚨 INSIDER ALERT: {alert.signal_type}
+{'=' * 70}
 
 Ticker: {alert.ticker}
 Company: {alert.company_name}
@@ -1903,42 +3034,90 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
     
     # Add signal-specific details
-    if "num_insiders" in alert.details:
-        text += f"""
-Number of Insiders: {alert.details['num_insiders']}
-Total Value: ${alert.details['total_value']:,.2f}
-Window: {alert.details['window_days']} days
-"""
+    if "num_insiders" in alert.details or "num_politicians" in alert.details:
+        num = alert.details.get('num_insiders', alert.details.get('num_politicians', 0))
+        text += f"\n{'Insiders' if 'num_insiders' in alert.details else 'Politicians'}: {num}\n"
+        if "total_value" in alert.details:
+            text += f"Total Value: ${alert.details['total_value']:,.0f}\n"
+        if "window_days" in alert.details:
+            text += f"Window: {alert.details['window_days']} days\n"
+        if alert.details.get("bipartisan"):
+            text += "🏛️ Bipartisan: Both parties involved\n"
+            
+    elif "politician" in alert.details:
+        text += f"\nPolitician: {alert.details['politician']}\n"
+        text += f"Date: {alert.details['date']}\n"
+        text += "⭐ Known Trader: Proven track record\n"
+        
+    elif "investor" in alert.details:
+        text += f"\nCorporate Investor: {alert.details['investor']}\n"
+        text += f"Value: ${alert.details['value']:,.0f}\n"
+        if "trade_date" in alert.details:
+            text += f"Date: {alert.details['trade_date'].strftime('%Y-%m-%d')}\n"
+            
     elif "value" in alert.details:
-        text += f"""
-Insider: {alert.details['insider']}
-Title: {alert.details['title']}
-Value: ${alert.details['value']:,.2f}
-"""
+        if "insider" in alert.details:
+            text += f"\nInsider: {alert.details['insider']}\n"
+        if "title" in alert.details:
+            text += f"Title: {alert.details['title']}\n"
+        text += f"Value: ${alert.details['value']:,.0f}\n"
     
-    text += "\nTRADE DETAILS:\n" + "=" * 60 + "\n"
+    text += "\n" + "=" * 70 + "\n"
+    text += "TRADE DETAILS:\n"
+    text += "=" * 70 + "\n"
     
     # Add trade rows
-    for _, row in alert.trades.iterrows():
-        trade_date = row["Trade Date"].strftime('%Y-%m-%d') if pd.notna(row["Trade Date"]) else "N/A"
-        qty = f"{row['Qty']:,.0f}" if pd.notna(row['Qty']) else "N/A"
-        price = f"${row['Price']:,.2f}" if pd.notna(row['Price']) else "N/A"
-        value = f"${row['Value']:,.2f}" if pd.notna(row['Value']) else "N/A"
+    for _, row in alert.trades.head(5).iterrows():
+        trade_date = row["Trade Date"].strftime('%m/%d/%Y') if pd.notna(row["Trade Date"]) else "N/A"
+        name = row['Insider Name']
         
-        text += f"""
-Date: {trade_date}
-Insider: {row['Insider Name']}
-Title: {row.get('Title', 'Unknown')}
-Type: {row['Trade Type']}
-Qty: {qty} @ {price} = {value}
----
-"""
+        # Format name for Congressional trades
+        if '(' in name and ')' in name:
+            party_match = name.split('(')[1].split(')')[0] if '(' in name else ''
+            name_part = name.split('(')[0].strip()
+            name_parts = name_part.split()
+            if len(name_parts) >= 2:
+                name = f"{name_parts[0][0]}. {' '.join(name_parts[1:])} ({party_match})"
+        
+        text += f"\n• {trade_date}: {name}\n"
+        
+        # Value/Size
+        if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
+            text += f"  Size: {row['Size Range']}"
+            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
+                text += f" @ {row['Price']}"
+            text += "\n"
+        elif pd.notna(row.get('Value')) and row['Value'] > 0:
+            text += f"  Value: ${row['Value']:,.0f}"
+            if "Delta Own" in row and pd.notna(row["Delta Own"]) and str(row["Delta Own"]).strip():
+                text += f" ({row['Delta Own']})"
+            text += "\n"
     
-    text += f"""
-View on OpenInsider: {OPENINSIDER_URL}
-
-Alert ID: {alert.alert_id}
-"""
+    if len(alert.trades) > 5:
+        text += f"\n...and {len(alert.trades) - 5} more trades\n"
+    
+    # Add context summary
+    try:
+        context = get_company_context(alert.ticker)
+        confidence_score, score_reason = calculate_confidence_score(alert, context)
+        
+        text += "\n" + "=" * 70 + "\n"
+        text += f"CONFIDENCE: {'⭐' * confidence_score} ({confidence_score}/5)\n"
+        text += f"{score_reason}\n"
+        
+        text += "\n" + "=" * 70 + "\n"
+        text += "AI INSIGHT:\n"
+        text += "=" * 70 + "\n"
+        ai_insight = generate_ai_insight(alert, context, confidence_score)
+        text += f"{ai_insight}\n"
+        
+    except Exception as e:
+        logger.warning(f"Could not add context to text email: {e}")
+    
+    text += "\n" + "=" * 70 + "\n"
+    text += f"View on OpenInsider: https://openinsider.com/search?q={alert.ticker}\n"
+    text += f"\nAlert ID: {alert.alert_id[:16]}...\n"
+    text += "\nALPHA WHISPERER - Insider Trading Intelligence\n"
     
     return text
 
