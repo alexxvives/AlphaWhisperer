@@ -97,7 +97,9 @@ python test_telegram.py
 python test_all_signals.py
 ```
 
-## 🎯 Detection Signals (6 Types)
+## 🎯 Detection Signals
+
+### Corporate Insider Signals (6 Types)
 
 ### 1. Cluster Buying ⭐⭐⭐⭐
 **Trigger**: ≥3 insiders from the same ticker buy within 5 days, total value ≥$300K
@@ -140,6 +142,54 @@ python test_all_signals.py
 **Why it matters**: Coordinated selling by multiple insiders may signal concerns about future prospects (though less reliable than buys due to diversification needs).
 
 **AI Analysis**: Examines selling patterns, company performance, sector trends
+
+### Congressional Trading Signals (3 Types) 🏛️
+
+**Note**: Congressional signals are generated as standalone alerts when detected. ALL recent Congressional trades are also displayed with every corporate insider alert for context.
+
+#### 1. Congressional Cluster Buy ⭐⭐⭐⭐
+**Trigger**: ≥2 politicians buy the same ticker within 7 days
+
+**Why it matters**: Multiple Congress members buying the same stock suggests insider knowledge about upcoming legislation, regulations, or policy changes that could benefit the company. Clustering indicates consensus.
+
+**Detection**: System groups all recent Congressional buys by ticker and date, triggering alerts when 2+ politicians converge on the same stock.
+
+#### 2. Bipartisan Congressional Buy ⭐⭐⭐⭐⭐
+**Trigger**: Politicians from BOTH parties (D + R) buy the same ticker
+
+**Why it matters**: When Democrats AND Republicans agree to buy the same stock, it's an exceptionally powerful signal. Bipartisan consensus on upcoming policy/regulatory changes that will benefit the company is rare and highly predictive.
+
+**Detection**: Automatically flags cluster buys where both "(D)" and "(R)" politicians are involved.
+
+#### 3. High-Conviction Congressional Buy ⭐⭐⭐⭐
+**Trigger**: Known successful trader makes a purchase
+
+**Why it matters**: Certain Congress members have exceptional trading track records. Purchases by these "power traders" warrant special attention.
+
+**Tracked Politicians** (current list, expanding):
+- Nancy Pelosi
+- Josh Gottheimer
+- Michael McCaul
+- Tommy Tuberville
+- Dan Crenshaw
+- Brian Higgins
+
+**Detection**: Filters Congressional buys to only alert on trades from this curated list of known successful traders.
+
+### How Congressional Integration Works
+
+1. **Data Source**: Selenium scraper fetches recent trades from CapitolTrades.com (FREE - no API costs)
+2. **Signal Detection**: Runs alongside corporate insider detection every scan cycle
+3. **Context Display**: ALL recent Congressional trades shown with every corporate insider alert (provides market intelligence)
+4. **Standalone Alerts**: High-quality Congressional signals (clusters, bipartisan, high-conviction) trigger their own alerts
+5. **AI Integration**: When a politician's purchase matches a corporate insider alert ticker, AI flags "CONGRESSIONAL ALIGNMENT" for extra conviction
+
+**Configuration**:
+```env
+USE_CAPITOL_TRADES=true               # Enable Congressional scraping
+MIN_CONGRESSIONAL_CLUSTER=2           # Minimum politicians for cluster (default: 2)
+CONGRESSIONAL_LOOKBACK_DAYS=7         # Days to look back for clustering (default: 7)
+```
 
 ## 🧠 AI-Powered Insights
 

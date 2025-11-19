@@ -74,6 +74,8 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
 # Congressional Trading (CapitolTrades)
 USE_CAPITOL_TRADES = os.getenv("USE_CAPITOL_TRADES", "true").lower() == "true"
+MIN_CONGRESSIONAL_CLUSTER = int(os.getenv("MIN_CONGRESSIONAL_CLUSTER", "2"))
+CONGRESSIONAL_LOOKBACK_DAYS = int(os.getenv("CONGRESSIONAL_LOOKBACK_DAYS", "7"))
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
 CLUSTER_DAYS = int(os.getenv("CLUSTER_DAYS", "5"))
@@ -363,26 +365,44 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
                         if caps_sequences:
                             ticker_found = caps_sequences[-1]  # Use last one (usually the ticker)
                 
-                # Extract date - look for cells with date patterns
+                # Extract date, size (amount range), and price from cells
                 cells = row.find_all('td')
                 date_str = "Recent"
+                size_range = None
+                price = None
+                
+                import re
                 for cell in cells:
                     cell_text = cell.get_text(strip=True)
+                    
                     # Match date patterns like "30 Oct", "15 Nov"
                     if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                                               'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
                         # Extract just the date part
-                        import re
                         match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
                         if match:
                             date_str = match.group(1)
-                            break
+                    
+                    # Match size patterns like "1K-15K", "100K-250K", "15K-50K", "50K-100K"
+                    # Note: CapitolTrades uses en-dash (–) not regular hyphen (-)
+                    if not size_range:
+                        size_match = re.search(r'(\d+[KM][-–]\d+[KM])', cell_text, re.IGNORECASE)
+                        if size_match:
+                            size_range = size_match.group(1)
+                    
+                    # Match price patterns like "$66.69", "$148.21", "$110,589.00"
+                    if not price:
+                        price_match = re.search(r'\$(\d+(?:,\d+)?(?:\.\d{2})?)', cell_text)
+                        if price_match:
+                            price = price_match.group(0)
                 
                 trades.append({
                     'politician': politician_name + party_chamber,
                     'type': trade_type,
                     'date': date_str,
-                    'ticker': ticker_found or 'N/A'
+                    'ticker': ticker_found or 'N/A',
+                    'size': size_range,
+                    'price': price
                 })
                 
             except Exception as e:
@@ -1306,6 +1326,187 @@ def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     return alerts
 
 
+def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[InsiderAlert]:
+    """
+    Detect Congressional Cluster Buy: 2+ politicians buy same ticker within 7 days.
+    
+    This is a strong signal because:
+    - Multiple politicians with insider info act together
+    - Often indicates upcoming policy/regulatory changes
+    - Bipartisan agreement is especially powerful
+    
+    Args:
+        congressional_trades: List of Congressional trade dictionaries
+        
+    Returns:
+        List of InsiderAlert objects
+    """
+    alerts = []
+    
+    if not congressional_trades:
+        return alerts
+    
+    # Filter to buys only
+    buys = [t for t in congressional_trades if t.get('type', '').upper() in ['BUY', 'PURCHASE']]
+    
+    if len(buys) < 2:
+        return alerts
+    
+    # Group by ticker
+    ticker_groups = {}
+    for trade in buys:
+        ticker = trade.get('ticker', 'N/A')
+        if ticker != 'N/A':
+            if ticker not in ticker_groups:
+                ticker_groups[ticker] = []
+            ticker_groups[ticker].append(trade)
+    
+    # Check for clusters (MIN_CONGRESSIONAL_CLUSTER+ politicians buying same ticker)
+    for ticker, trades in ticker_groups.items():
+        if len(trades) >= MIN_CONGRESSIONAL_CLUSTER:
+            # Check if bipartisan
+            politicians = [t.get('politician', '') for t in trades]
+            has_dem = any('(D)' in p for p in politicians)
+            has_rep = any('(R)' in p for p in politicians)
+            is_bipartisan = has_dem and has_rep
+            
+            # Create DataFrame for display (map Congressional fields to expected columns)
+            trades_data = []
+            for trade in trades:
+                # Parse date - handle formats like "16 Oct" or "2025-11-18"
+                date_str = trade.get('date', 'Recent')
+                try:
+                    if '-' in date_str:
+                        trade_date = pd.to_datetime(date_str)
+                    else:
+                        # Format like "16 Oct" - add current year
+                        trade_date = pd.to_datetime(f"{date_str} {datetime.now().year}", format='%d %b %Y')
+                except:
+                    trade_date = datetime.now()
+                
+                # Use size range as value display (e.g., "1K-15K", "100K-250K")
+                size_display = trade.get('size', '')
+                
+                trades_data.append({
+                    "Ticker": ticker,
+                    "Insider Name": trade.get('politician', 'Unknown'),
+                    "Trade Date": trade_date,
+                    "Title": trade.get('chamber', 'Congress'),
+                    "Value": 0,  # Not used for Congressional (we use size_range)
+                    "Size Range": size_display,
+                    "Price": trade.get('price', ''),
+                    "Delta Own": ""
+                })
+            trades_df = pd.DataFrame(trades_data)
+            
+            signal_type = "Congressional Cluster Buy"
+            if is_bipartisan:
+                signal_type = "Bipartisan Congressional Buy"
+            
+            alert = InsiderAlert(
+                signal_type=signal_type,
+                ticker=ticker,
+                company_name=ticker,  # We don't have company name from Congressional data
+                trades=trades_df,
+                details={
+                    "num_politicians": len(trades),
+                    "politicians": politicians[:5],  # First 5
+                    "bipartisan": is_bipartisan,
+                    "dates": [t.get('date', 'Recent') for t in trades]
+                }
+            )
+            alerts.append(alert)
+    
+    logger.info(f"Detected {len(alerts)} Congressional cluster buy signals")
+    return alerts
+
+
+def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -> List[InsiderAlert]:
+    """
+    Detect High-Conviction Congressional Buy: Single politician with strong signal.
+    
+    Triggers when:
+    - Known successful trader (track record)
+    - Large purchase ($100K+)
+    - Committee-aligned purchase
+    
+    Note: For MVP, we filter by purchase size. Future enhancement: track record & committee data.
+    
+    Args:
+        congressional_trades: List of Congressional trade dictionaries
+        
+    Returns:
+        List of InsiderAlert objects
+    """
+    alerts = []
+    
+    if not congressional_trades:
+        return alerts
+    
+    # Filter to buys only
+    buys = [t for t in congressional_trades if t.get('type', '').upper() in ['BUY', 'PURCHASE']]
+    
+    # Known high-performing traders (can expand this list)
+    top_traders = [
+        'Nancy Pelosi', 'Josh Gottheimer', 'Michael McCaul',
+        'Tommy Tuberville', 'Dan Crenshaw', 'Brian Higgins'
+    ]
+    
+    for trade in buys:
+        politician = trade.get('politician', '')
+        ticker = trade.get('ticker', 'N/A')
+        
+        if ticker == 'N/A':
+            continue
+        
+        # Check if this politician is a known successful trader
+        is_top_trader = any(trader in politician for trader in top_traders)
+        
+        if is_top_trader:
+            # Create DataFrame for display (map Congressional fields to expected columns)
+            # Parse date - handle formats like "16 Oct" or "2025-11-18"
+            date_str = trade.get('date', 'Recent')
+            try:
+                if '-' in date_str:
+                    trade_date = pd.to_datetime(date_str)
+                else:
+                    # Format like "16 Oct" - add current year
+                    trade_date = pd.to_datetime(f"{date_str} {datetime.now().year}", format='%d %b %Y')
+            except:
+                trade_date = datetime.now()
+            
+            # Use size range as value display (e.g., "1K-15K", "100K-250K")
+            size_display = trade.get('size', '')
+            
+            trades_data = {
+                "Ticker": ticker,
+                "Insider Name": politician,
+                "Trade Date": trade_date,
+                "Title": trade.get('chamber', 'Congress'),
+                "Value": 0,  # Not used for Congressional (we use size_range)
+                "Size Range": size_display,
+                "Price": trade.get('price', ''),
+                "Delta Own": ""
+            }
+            trades_df = pd.DataFrame([trades_data])
+            
+            alert = InsiderAlert(
+                signal_type="High-Conviction Congressional Buy",
+                ticker=ticker,
+                company_name=ticker,
+                trades=trades_df,
+                details={
+                    "politician": politician,
+                    "date": trade.get('date', 'Recent'),
+                    "known_trader": True
+                }
+            )
+            alerts.append(alert)
+    
+    logger.info(f"Detected {len(alerts)} high-conviction Congressional buy signals")
+    return alerts
+
+
 def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     """
     Run all signal detection functions.
@@ -1320,13 +1521,25 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     
     all_alerts = []
     
-    # Run each detector
+    # Corporate insider signals
     all_alerts.extend(detect_cluster_buying(df))
     all_alerts.extend(detect_ceo_cfo_buy(df))
     all_alerts.extend(detect_large_single_buy(df))
     all_alerts.extend(detect_first_buy_12m(df))
     all_alerts.extend(detect_bearish_cluster_selling(df))
     all_alerts.extend(detect_strategic_investor_buy(df))
+    
+    # Congressional signals (if enabled)
+    if USE_CAPITOL_TRADES:
+        try:
+            logger.info("Fetching Congressional trades for signal detection")
+            congressional_trades = get_congressional_trades()
+            
+            if congressional_trades:
+                all_alerts.extend(detect_congressional_cluster_buy(congressional_trades))
+                all_alerts.extend(detect_high_conviction_congressional_buy(congressional_trades))
+        except Exception as e:
+            logger.error(f"Error detecting Congressional signals: {e}", exc_info=True)
     
     logger.info(f"Total signals detected: {len(all_alerts)}")
     return all_alerts
@@ -1500,22 +1713,52 @@ def format_telegram_message(alert: InsiderAlert) -> str:
     msg += f"\n📊 *Trades:*\n"
     for idx, (_, row) in enumerate(alert.trades.head(3).iterrows()):
         date = row["Trade Date"].strftime('%m/%d') if pd.notna(row["Trade Date"]) else "?"
-        value = f"${row['Value']:,.0f}" if pd.notna(row['Value']) else "?"
-        insider = escape_md(row['Insider Name'][:25])
-        date_esc = escape_md(date)
-        value_esc = escape_md(value)
         
-        # Add ownership change % if available
-        ownership_info = ""
+        # Format insider name - for Congressional trades, shorten to "Initial. LastName (Party)"
+        insider_name = row['Insider Name']
+        if '(' in insider_name and ')' in insider_name:  # Congressional format: "Name (D)-House"
+            # Extract party letter
+            party_match = insider_name.split('(')[1].split(')')[0] if '(' in insider_name else ''
+            # Get name parts
+            name_part = insider_name.split('(')[0].strip()
+            name_parts = name_part.split()
+            if len(name_parts) >= 2:
+                # Format as "J. Gottheimer (D)"
+                formatted_name = f"{name_parts[0][0]}. {' '.join(name_parts[1:])} ({party_match})"
+            else:
+                formatted_name = f"{name_part} ({party_match})"
+            insider = escape_md(formatted_name[:30])
+        else:
+            insider = escape_md(insider_name[:25])
+        
+        date_esc = escape_md(date)
+        
+        # Build trade line
+        trade_line = f"• {date_esc}: {insider}"
+        
+        # For Congressional trades, show size range and price
+        if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
+            size_range = escape_md(str(row["Size Range"]))
+            trade_line += f" \\- {size_range}"
+            # Add price if available
+            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
+                price_val = escape_md(str(row["Price"]))
+                trade_line += f" @ {price_val}"
+        # For corporate insider trades, show dollar value
+        elif pd.notna(row['Value']) and row['Value'] > 0:
+            value_esc = escape_md(f"${row['Value']:,.0f}")
+            trade_line += f" \\- {value_esc}"
+        
+        # Add ownership change % if available and not empty (corporate insiders only)
         if "Delta Own" in row and pd.notna(row["Delta Own"]):
             delta_own = row["Delta Own"]
-            # Handle both string ("+5%") and float (0.05) formats
-            if isinstance(delta_own, str):
-                ownership_info = f" \\({escape_md(delta_own)}\\)"
+            # Only add if it's a meaningful value (not empty string)
+            if isinstance(delta_own, str) and delta_own.strip():
+                trade_line += f" \\({escape_md(delta_own)}\\)"
             elif isinstance(delta_own, (int, float)):
-                ownership_info = f" \\({delta_own:+.1f}%\\)"
+                trade_line += f" \\({delta_own:+.1f}%\\)"
         
-        msg += f"• {date_esc}: {insider} \\- {value_esc}{ownership_info}\n"
+        msg += trade_line + "\n"
     
     if len(alert.trades) > 3:
         msg += f"• \\.\\.\\.\\+{len(alert.trades) - 3} more\n"
@@ -1590,15 +1833,15 @@ def format_telegram_message(alert: InsiderAlert) -> str:
             role_desc = get_insider_role_description(alert.details["title"])
             msg += f"\n👔 *Insider Role:*\n{escape_md(role_desc)}\n"
         
-        # Congressional trades (if available) - shows ALL recent trades, not just this ticker
+        # Congressional trades (if available) - shows ALL recent trades for market intelligence
         if context.get("congressional_trades"):
             congressional_trades = context["congressional_trades"]
             buys = [t for t in congressional_trades if t.get("type", "").upper() in ["BUY", "PURCHASE"]]
             sells = [t for t in congressional_trades if t.get("type", "").upper() in ["SELL", "SALE"]]
             
             if buys or sells:
-                msg += f"\n🏛️ *Recent Congressional Trading:*\n"
-                msg += f"_What politicians are buying/selling now\\.\\.\\._\n\n"
+                msg += f"\n🏛️ *Congressional Market Activity:*\n"
+                msg += f"_Recent trades across all stocks for context\\.\\.\\._\n\n"
                 
                 if buys:
                     msg += f"📈 *Buys:*\n"
