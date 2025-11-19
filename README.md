@@ -1,16 +1,36 @@
-# Insider Trading Alert System
+# InvestorAI - Intelligent Insider Trading Alert System
 
-A production-ready Python script that monitors insider trading activity from OpenInsider.com and sends email alerts when high-conviction signals are detected.
+A production-ready AI-powered Python system that monitors insider trading activity from OpenInsider.com and delivers rich, actionable intelligence via Telegram and email.
 
-## Features
+## 🚀 Features
 
-- **Real-time monitoring** of insider Form 4 filings from OpenInsider
-- **7 powerful signals** for detecting significant insider activity
-- **Email alerts** with detailed trade information and links
+### Core Intelligence
+- **Real-time monitoring** of insider Form 4 filings from OpenInsider.com
+- **6 powerful signal types** detecting high-conviction insider activity
+- **AI-powered insights** with BUY/SELL/HOLD recommendations
+- **Multi-factor confidence scoring** (1-5 stars) based on signal strength
+- **Congressional trading integration** (framework ready for API)
+
+### Rich Market Context
+- **Ownership tracking**: Shows % ownership changes per trade
+- **Price action analysis**: 5-day and 1-month % changes with trend indicators
+- **52-week range analysis**: Distance from highs/lows
+- **Short squeeze detection**: Flags high short interest (>15%)
+- **Company fundamentals**: Market cap, P/E ratio, sector, descriptions
+- **News integration**: Recent headlines (when API configured)
+- **Strategic investor detection**: Identifies corporate buyers (e.g., NVIDIA investing)
+
+### Communication
+- **Telegram alerts** with rich markdown formatting
+- **Email alerts** as backup
 - **Smart de-duplication** to avoid repeat alerts
-- **Robust parsing** with fallback mechanisms for HTML changes
 - **Configurable thresholds** for all detection rules
-- **Run modes**: single execution or continuous monitoring
+
+### Reliability
+- **Robust parsing** with pandas + BeautifulSoup fallback
+- **Continuous monitoring** with configurable intervals
+- **Comprehensive logging** for debugging
+- **Production-tested** with error handling
 
 ## Quick Start
 
@@ -38,81 +58,236 @@ ALERT_TO=recipient@example.com
 
 **Gmail Users**: Generate an [App Password](https://myaccount.google.com/apppasswords) instead of using your regular password.
 
-### 3. Run the Script
+### 3. Configure Telegram (Recommended)
+
+Telegram provides rich formatting, unlimited messages, and instant delivery:
+
+1. Open Telegram and search for `@BotFather`
+2. Send `/newbot` and follow instructions
+3. Copy your bot token
+4. Search for `@userinfobot` and send `/start`
+5. Copy your chat_id
+6. Update `.env`:
+   ```env
+   TELEGRAM_BOT_TOKEN=your_bot_token_here
+   TELEGRAM_CHAT_ID=your_chat_id_here
+   USE_TELEGRAM=true
+   ```
+
+### 4. Run the Script
 
 ```bash
 # Single execution
-python insider_alerts.py --once
+python insider_alerts.py
 
-# Continuous monitoring (every 30 minutes)
-python insider_alerts.py --loop
+# Continuous monitoring (every 30 minutes) - RECOMMENDED
+python insider_alerts.py --loop --interval-minutes 30
 
 # Custom interval (every 60 minutes)
 python insider_alerts.py --loop --interval-minutes 60
-
-# Dry run (no emails sent, logs only)
-python insider_alerts.py --once --dry-run
-
-# Verbose logging
-python insider_alerts.py --once --verbose
-
-# Process trades since specific date
-python insider_alerts.py --once --since 2025-11-01
 ```
 
-## Detection Signals
+### 5. Test the System
 
-### 1. Cluster Buying
+```bash
+# Test Telegram connection
+python test_telegram.py
+
+# Test all signal types
+python test_all_signals.py
+```
+
+## 🎯 Detection Signals (6 Types)
+
+### 1. Cluster Buying ⭐⭐⭐⭐
 **Trigger**: ≥3 insiders from the same ticker buy within 5 days, total value ≥$300K
 
-**Why it matters**: Multiple insiders buying simultaneously suggests strong conviction about the company's prospects.
+**Why it matters**: Multiple insiders buying simultaneously suggests strong internal conviction. When 3+ insiders coordinate purchases, it's rarely a coincidence - they often see a major catalyst ahead.
 
-### 2. CEO/CFO Buy
+**AI Analysis**: Detects insider consensus, evaluates price action, checks for Congressional alignment
+
+### 2. CEO/CFO Buy ⭐⭐⭐
 **Trigger**: CEO or CFO buys ≥$100K
 
-**Why it matters**: Top executives have the best visibility into company performance and future prospects.
+**Why it matters**: C-suite executives have the deepest knowledge of company strategy, financials, and future prospects. Their personal investments carry exceptional weight.
 
-### 3. Large Single Buy
+**AI Analysis**: Examines role significance, purchase size relative to salary, timing vs. price action
+
+### 3. Large Single Buy ⭐⭐⭐
 **Trigger**: Any insider buys ≥$250K
 
-**Why it matters**: Significant dollar amounts indicate strong personal conviction.
+**Why it matters**: Large dollar amounts represent significant personal capital commitment, indicating strong conviction regardless of title.
 
-### 4. First Buy in 12 Months
+**AI Analysis**: Evaluates purchase size, ownership %, company fundamentals
+
+### 4. First Buy in 12 Months ⭐⭐
 **Trigger**: Insider's first purchase in 365 days, ≥$50K
 
-**Why it matters**: Breaking a long period of inactivity suggests a major inflection point.
+**Why it matters**: Breaking a long period of inactivity suggests the insider sees a major inflection point or exceptional value.
 
-### 5. Buy Near 52-Week Low
-**Trigger**: Insider buys when price ≤110% of 52-week low
+**AI Analysis**: Compares current price to historical range, examines market conditions
 
-**Why it matters**: Insiders buying at depressed prices may signal a bottom.
+### 5. Strategic Investor Buy ⭐⭐⭐⭐⭐
+**Trigger**: Corporate entity (e.g., "NVIDIA CORPORATION") buying shares
 
-### 6. Sector Cluster (Optional)
-**Trigger**: ≥5 insiders across 3+ tickers in same sector, combined ≥$1M within 5 days
+**Why it matters**: Corporate investors conduct months of due diligence. Their investments often signal strategic partnerships, acquisition interest, or technology validation.
 
-**Why it matters**: Broad sector buying may indicate industry-wide positive developments.
+**AI Analysis**: Identifies investor significance, potential strategic rationale
 
-### 7. Bearish Cluster Selling (Optional)
+### 6. Bearish Cluster Selling ⚠️
 **Trigger**: ≥3 insiders from same ticker sell within 5 days, total ≥$1M
 
-**Why it matters**: Coordinated selling by multiple insiders may signal concerns.
+**Why it matters**: Coordinated selling by multiple insiders may signal concerns about future prospects (though less reliable than buys due to diversification needs).
 
-## Configuration
+**AI Analysis**: Examines selling patterns, company performance, sector trends
 
-All thresholds are configurable in `.env`:
+## 🧠 AI-Powered Insights
+
+The system generates contextual analysis for each signal:
+
+### Pattern Detection
+- **Short Squeeze Setups**: High short interest + insider buying = potential squeeze
+- **Dip Buying**: Insiders buying near 52-week lows = bottom fishing
+- **Congressional Alignment**: Politicians + insiders buying = exceptionally strong signal
+- **Falling Knives**: Warns when negative momentum conflicts with insider buying
+
+### Recommendations
+- **STRONG BUY**: Multiple bullish factors align (short squeeze, Congressional alignment, strategic investment)
+- **BUY**: Positive setup with good risk/reward
+- **HOLD/ACCUMULATE**: Solid opportunity, build position gradually
+- **MONITOR**: Watch for additional confirmation
+- **WAIT**: Let price stabilize before entering
+
+### Confidence Scoring (1-5 Stars)
+
+**Factors Analyzed**:
+- Signal type strength (Cluster/Strategic = +2.0, CEO/CFO = +1.5)
+- Purchase size ($1M+ = +1.0, $500K+ = +0.5)
+- Ownership increase (>10% = +1.0, >5% = +0.5)
+- Price location (<20% from 52w low = +1.0)
+- Short interest (>15% = +0.5)
+- Valuation (P/E 5-15 = +0.5)
+- Congressional alignment (politicians buying = +0.5)
+
+**Typical Scores**:
+- ⭐⭐⭐⭐⭐ (5/5): Cluster + Congressional + dip buying + high short interest
+- ⭐⭐⭐⭐ (4/5): Cluster buying near 52w low OR CEO/CFO + strategic factors
+- ⭐⭐⭐ (3/5): Large single buy with decent fundamentals
+- ⭐⭐ (2/5): First buy in 12m or smaller purchases
+- ⭐ (1/5): Minimal conviction signals
+
+## ⚙️ Configuration
+
+### Core Settings (.env)
 
 ```env
+# Telegram (Recommended - Free, Unlimited, Rich Formatting)
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+USE_TELEGRAM=true
+
+# Email (Backup)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your-email@gmail.com
+SMTP_PASS=your-app-password
+ALERT_TO=recipient@example.com
+
+# NewsAPI (Optional - 100 requests/day free)
+NEWS_API_KEY=get_from_newsapi.org
+USE_NEWS_CONTEXT=true
+
+# Congressional Trading (Optional - Requires API)
+USE_CAPITOL_TRADES=false     # Set true when QuiverQuant API configured
+
+# Detection Thresholds
 LOOKBACK_DAYS=7              # Days of history to analyze
 CLUSTER_DAYS=5               # Window for cluster detection
-MIN_LARGE_BUY=250000         # Minimum for large buy signal
-MIN_CEO_CFO_BUY=100000       # Minimum for CEO/CFO buy
-MIN_CLUSTER_BUY_VALUE=300000 # Minimum total for cluster buy
-MIN_FIRST_BUY_12M=50000      # Minimum for first buy signal
-MIN_SECTOR_CLUSTER_VALUE=1000000  # Minimum for sector cluster
-MIN_BEARISH_CLUSTER_VALUE=1000000 # Minimum for bearish cluster
+MIN_LARGE_BUY=250000         # Minimum for large buy signal ($250K)
+MIN_CEO_CFO_BUY=100000       # Minimum for CEO/CFO buy ($100K)
+MIN_CLUSTER_BUY_VALUE=300000 # Minimum total for cluster buy ($300K)
+MIN_FIRST_BUY_12M=50000      # Minimum for first buy signal ($50K)
 ```
 
-## Troubleshooting
+### Advanced Features
+
+#### Congressional Trading Integration
+Cross-reference insider buys with Congressional stock purchases for exceptionally strong signals.
+
+**Status**: Framework complete, awaiting API configuration
+
+**Setup**:
+1. Sign up for [QuiverQuant API](https://api.quiverquant.com/) (~$20/month)
+2. Update `.env`:
+   ```env
+   USE_CAPITOL_TRADES=true
+   QUIVER_API_KEY=your_api_key
+   ```
+3. See `CONGRESSIONAL_INTEGRATION.md` for implementation details
+
+**Benefits**:
+- Detects when politicians + insiders both buy same stock
+- Politicians have access to policy/regulatory insights
+- Boosts confidence score by +0.5
+- Triggers STRONG BUY recommendation
+
+## 📊 Example Telegram Alert
+
+```markdown
+🚨 *Cluster Buying*
+
+*NVDA* - NVIDIA Corporation
+
+👥 3 insiders
+💰 $2,500,000
+📅 Window: 5 days
+
+📊 *Trades:*
+• 10/28: John Smith - $1,000,000 (+2.5%)
+• 10/29: Jane Doe - $900,000 (+1.8%)
+• 10/30: Bob Johnson - $600,000 (+1.2%)
+
+📊 *Price Action:*
+• 5-day: 🔴 -3.2%
+• 1-month: 🔴 -8.5%
+
+📏 *52-Week Range:*
+• High: $150.25
+• Low: $98.50
+• Current: $112.30
+• 14.0% above 52w low
+
+🏢 *About:*
+NVIDIA Corporation designs graphics processing units for gaming and data centers.
+
+📈 *Market Data:*
+• Sector: Technology
+• Market Cap: $450.2B
+• P/E Ratio: 12.4
+• Short Interest: 🔥18.5%
+
+👔 *Insider Role:*
+CEOs control company strategy and have deepest knowledge of future plans...
+
+⭐⭐⭐⭐ *Confidence: 4/5*
+_Multiple insiders buying; $1M+ purchase; Buying near 52-week low; High short interest (18.5%)_
+
+🧠 *AI Insight:*
+🔥 SHORT SQUEEZE SETUP: 18.5% of shares are sold short. Insiders are buying heavily while 
+shorts bet against the stock. If the stock rises, short sellers will be forced to buy shares 
+to cover their positions, creating a feedback loop that could rocket the price higher.
+
+💎 DIP BUYING OPPORTUNITY: Stock is trading just 14.0% above its 52-week low. Insiders are 
+buying at/near the bottom, signaling they believe the worst is over. This is classic 'smart 
+money' behavior - buying when pessimism is highest.
+
+🚀 RECOMMENDATION: STRONG BUY - Multiple bullish factors align. Consider taking a position.
+
+Key factors: High short interest + insider buying = squeeze potential, Multiple insiders = 
+strong conviction, Buying near 52-week low
+```
+
+## 🛠️ Troubleshooting
 
 ### Gmail Authentication Errors
 
@@ -123,15 +298,111 @@ MIN_BEARISH_CLUSTER_VALUE=1000000 # Minimum for bearish cluster
 2. Generate an [App Password](https://myaccount.google.com/apppasswords)
 3. Use the app password in `SMTP_PASS`, not your regular password
 
-### No Alerts Being Sent
+### Telegram Not Sending
 
-Check:
+**Problem**: No messages in Telegram
+
+**Solution**:
+1. Test connection: `python test_telegram.py`
+2. Verify bot token and chat_id in `.env`
+3. Ensure `USE_TELEGRAM=true`
+4. Check bot has permission to post in channel/group
+
+### No Alerts Being Generated
+
+**Check**:
 1. Verify `.env` configuration
-2. Run with `--verbose --dry-run` to see detected signals
+2. Run: `python test_all_signals.py` to see if detection works
 3. Check `logs/insider_alerts.log` for errors
 4. Ensure signals meet threshold requirements
+5. Visit https://openinsider.com to confirm recent activity
 
-## License
+### NewsAPI Errors
+
+**Problem**: News section empty or errors
+
+**Solution**:
+1. Regenerate API key at https://newsapi.org/
+2. Update `NEWS_API_KEY` in `.env`
+3. Free tier: 100 requests/day limit
+4. Can disable: `USE_NEWS_CONTEXT=false`
+
+## 📁 Project Structure
+
+```
+InvestorAI/
+├── insider_alerts.py              # Main script (1896 lines)
+├── .env                            # Configuration
+├── requirements.txt                # Python dependencies
+├── test_telegram.py               # Test Telegram connection
+├── test_all_signals.py            # Test signal detection
+├── test_congressional.py          # Test Congressional scraper
+├── README.md                       # This file
+├── QUICK_REFERENCE.md             # Quick command reference
+└── CONGRESSIONAL_INTEGRATION.md   # Congressional feature docs
+```
+
+## 🚀 Production Deployment
+
+### Recommended Setup
+
+```powershell
+# Windows (PowerShell)
+cd C:\Users\alexx\Desktop\Projects\InvestorAI
+.\.venv\Scripts\python.exe insider_alerts.py --loop --interval-minutes 30
+```
+
+This will:
+- Check OpenInsider every 30 minutes
+- Send Telegram alerts for new signals
+- Log all activity to `logs/insider_alerts.log`
+- Run continuously until stopped (Ctrl+C)
+
+### Alternative: Windows Task Scheduler
+
+For daily runs instead of continuous:
+1. Open Task Scheduler
+2. Create Basic Task
+3. Trigger: Daily at 9:00 AM (market open)
+4. Action: Start Program
+5. Program: `C:\Users\alexx\Desktop\Projects\InvestorAI\.venv\Scripts\python.exe`
+6. Arguments: `insider_alerts.py`
+7. Start in: `C:\Users\alexx\Desktop\Projects\InvestorAI`
+
+## 💰 Cost Analysis
+
+| Feature | Service | Cost |
+|---------|---------|------|
+| OpenInsider | Free | $0 |
+| yfinance | Free | $0 |
+| Telegram | Free | $0 |
+| NewsAPI | Free Tier | $0 |
+| **Current Total** | | **$0/month** |
+| | | |
+| Congressional Data | QuiverQuant | ~$20/month |
+| **With Congressional** | | **~$20/month** |
+
+## 🔗 Useful Links
+
+- **OpenInsider**: https://openinsider.com
+- **NewsAPI**: https://newsapi.org/
+- **QuiverQuant API**: https://api.quiverquant.com/
+- **yfinance Documentation**: https://pypi.org/project/yfinance/
+- **Telegram Bot API**: https://core.telegram.org/bots/api
+
+## 📚 Additional Documentation
+
+- `QUICK_REFERENCE.md` - Command reference and troubleshooting
+- `CONGRESSIONAL_INTEGRATION.md` - Congressional trading feature details
+- `logs/insider_alerts.log` - Runtime logs and debugging info
+
+## 📝 License
 
 MIT License
+
+---
+
+**Version**: 2.0 (AI-Powered with Congressional Framework)  
+**Status**: Production Ready ✅  
+**Last Updated**: November 2025
 
