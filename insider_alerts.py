@@ -63,6 +63,11 @@ SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
 ALERT_TO = os.getenv("ALERT_TO", "")
 
+# Telegram Configuration (optional)
+USE_TELEGRAM = os.getenv("USE_TELEGRAM", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
 CLUSTER_DAYS = int(os.getenv("CLUSTER_DAYS", "5"))
 MIN_LARGE_BUY = float(os.getenv("MIN_LARGE_BUY", "250000"))
@@ -835,6 +840,54 @@ def format_email_html(alert: InsiderAlert) -> str:
     return html
 
 
+def format_telegram_message(alert: InsiderAlert) -> str:
+    """Format alert as Telegram message with markdown."""
+    # Escape special characters for Telegram MarkdownV2
+    def escape_md(text):
+        """Escape special characters for Telegram MarkdownV2."""
+        if not isinstance(text, str):
+            text = str(text)
+        chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+        for char in chars_to_escape:
+            text = text.replace(char, f'\\{char}')
+        return text
+    
+    msg = f"🚨 *{escape_md(alert.signal_type)}*\\n\\n"
+    company_esc = escape_md(alert.company_name)
+    ticker_esc = escape_md(alert.ticker)
+    msg += f"*{ticker_esc}* \\- {company_esc}\\n\\n"
+    
+    # Signal details
+    if "num_insiders" in alert.details:
+        msg += f"👥 {alert.details['num_insiders']} insiders\\n"
+        msg += f"💰 ${alert.details['total_value']:,.0f}\\n"
+        msg += f"📅 Window: {alert.details['window_days']} days\\n"
+    elif "value" in alert.details:
+        insider_esc = escape_md(alert.details['insider'])
+        title_esc = escape_md(alert.details['title'])
+        msg += f"👤 {insider_esc} \\({title_esc}\\)\\n"
+        msg += f"💰 ${alert.details['value']:,.0f}\\n"
+        if "trade_date" in alert.details:
+            date_str = alert.details['trade_date'].strftime('%Y-%m-%d')
+            msg += f"📅 {escape_md(date_str)}\\n"
+    
+    # Top trades (max 3 for brevity)
+    msg += f"\\n📊 *Trades:*\\n"
+    for idx, (_, row) in enumerate(alert.trades.head(3).iterrows()):
+        date = row["Trade Date"].strftime('%m/%d') if pd.notna(row["Trade Date"]) else "?"
+        value = f"${row['Value']:,.0f}" if pd.notna(row['Value']) else "?"
+        insider = escape_md(row['Insider Name'][:25])
+        date_esc = escape_md(date)
+        value_esc = escape_md(value)
+        msg += f"• {date_esc}: {insider} \\- {value_esc}\\n"
+    
+    if len(alert.trades) > 3:
+        msg += f"• \\.\\.\\.\\+{len(alert.trades) - 3} more\\n"
+    
+    msg += f"\\n🔗 [View on OpenInsider]({OPENINSIDER_URL})"
+    return msg
+
+
 def format_email_text(alert: InsiderAlert) -> str:
     """
     Format alert as plain text email body.
@@ -894,6 +947,44 @@ Alert ID: {alert.alert_id}
 """
     
     return text
+
+
+def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
+    """Send Telegram alert via Bot API."""
+    if not USE_TELEGRAM:
+        return False
+    
+    if dry_run:
+        logger.info(f"DRY RUN - Would send Telegram: {alert.ticker} - {alert.signal_type}")
+        return True
+    
+    try:
+        import asyncio
+        from telegram import Bot
+        from telegram.constants import ParseMode
+        
+        # Format message
+        message_text = format_telegram_message(alert)
+        
+        # Send via Telegram Bot API (async)
+        async def send_message():
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            await bot.send_message(
+                chat_id=TELEGRAM_CHAT_ID,
+                text=message_text,
+                parse_mode=ParseMode.MARKDOWN_V2,
+                disable_web_page_preview=True
+            )
+        
+        # Run async function
+        asyncio.run(send_message())
+        
+        logger.info(f"Telegram sent successfully: {alert.ticker}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send Telegram: {e}")
+        return False
 
 
 def send_email_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
@@ -968,8 +1059,15 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
     
     logger.info(f"Found {len(new_alerts)} new alerts (out of {len(alerts)} total)")
     
-    # Send emails for new alerts
+    # Send alerts for new signals
     for alert in new_alerts:
+        # Try Telegram first if enabled
+        if USE_TELEGRAM:
+            telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
+            if telegram_sent:
+                logger.info(f"Alert sent via Telegram: {alert.ticker}")
+        
+        # Always send email as backup or primary
         send_email_alert(alert, dry_run=dry_run)
     
     # Save updated state
@@ -1103,9 +1201,16 @@ def main():
     args = parser.parse_args()
     
     # Validate configuration
-    if not args.dry_run and not all([SMTP_USER, SMTP_PASS, ALERT_TO]):
-        logger.error("Email configuration missing. Set SMTP_USER, SMTP_PASS, and ALERT_TO in .env")
-        sys.exit(1)
+    if not args.dry_run:
+        has_email = all([SMTP_USER, SMTP_PASS, ALERT_TO])
+        has_telegram = USE_TELEGRAM and all([TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID])
+        
+        if not has_email and not has_telegram:
+            logger.error("Alert configuration missing. Set either email (SMTP_*) or Telegram (TELEGRAM_*) credentials in .env")
+            sys.exit(1)
+        
+        if USE_TELEGRAM and not has_telegram:
+            logger.warning("USE_TELEGRAM=true but Telegram credentials missing. Falling back to email only.")
     
     # Run appropriate mode
     try:
