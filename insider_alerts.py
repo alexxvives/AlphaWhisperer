@@ -194,31 +194,6 @@ def init_database():
             )
         """)
         
-        # Politician ID mapping cache
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS politician_ids (
-                politician_name TEXT PRIMARY KEY,
-                politician_id TEXT NOT NULL,
-                party TEXT,
-                chamber TEXT,
-                state TEXT,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Future: Politician performance stats
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS politician_stats (
-                politician_name TEXT PRIMARY KEY,
-                total_trades INTEGER DEFAULT 0,
-                total_buys INTEGER DEFAULT 0,
-                total_sells INTEGER DEFAULT 0,
-                most_traded_ticker TEXT,
-                last_trade_date TEXT,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
         # Create indices for faster queries
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON congressional_trades(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_traded_date ON congressional_trades(traded_date)")
