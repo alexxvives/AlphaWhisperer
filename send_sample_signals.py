@@ -149,33 +149,18 @@ def send_one_of_each_signal():
     logger.info(f"  Congressional: {len([a for a in congressional_alerts if a.signal_type in signal_types])}")
     logger.info(f"  OpenInsider: {len([a for a in openinsider_alerts if a.signal_type in signal_types])}")
     
-    # Send ONLY ONE email (first OpenInsider signal for testing)
-    openinsider_signal = None
-    for signal_type, alert in signal_types.items():
-        if alert in openinsider_alerts:
-            openinsider_signal = (signal_type, alert)
-            break
+    # Send just the first signal for testing
+    signal_type, alert = list(signal_types.items())[0]
+    source = "Congressional" if alert in congressional_alerts else "OpenInsider"
+    logger.info(f"\nSending TEST email: {signal_type} - {alert.ticker} ({source})")
     
-    # If no OpenInsider signal, use first Congressional signal
-    if not openinsider_signal:
-        signal_type, alert = list(signal_types.items())[0]
+    # Send email
+    success = send_email_alert(alert, dry_run=False, subject_prefix=f"TEST: ")
+    
+    if success:
+        logger.info(f"Email sent successfully")
     else:
-        signal_type, alert = openinsider_signal
-    
-    try:
-        source = "Congressional" if alert in congressional_alerts else "OpenInsider"
-        logger.info(f"\nSending TEST email: {signal_type} - {alert.ticker} ({source})")
-        
-        # Send email with numbered subject
-        success = send_email_alert(alert, dry_run=False, subject_prefix=f"TEST: ")
-        
-        if success:
-            logger.info(f"Email sent successfully")
-        else:
-            logger.error(f"Email failed to send")
-            
-    except Exception as e:
-        logger.error(f"Error sending email: {e}", exc_info=True)
+        logger.error(f"Email failed to send")
     
     logger.info(f"\n{'='*60}")
     logger.info(f"Completed sending test email")

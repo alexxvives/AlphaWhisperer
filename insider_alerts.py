@@ -229,6 +229,30 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_ticker ON politician_pnl(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_total ON politician_pnl(total_pnl)")
         
+        # OpenInsider corporate trades table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS openinsider_trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticker TEXT NOT NULL,
+                company_name TEXT,
+                insider_name TEXT NOT NULL,
+                insider_title TEXT,
+                trade_type TEXT NOT NULL,
+                trade_date TEXT NOT NULL,
+                value REAL,
+                qty INTEGER,
+                owned INTEGER,
+                delta_own REAL,
+                price REAL,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(ticker, insider_name, trade_date, value, trade_type)
+            )
+        """)
+        
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_ticker ON openinsider_trades(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_trade_date ON openinsider_trades(trade_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_scraped_at ON openinsider_trades(scraped_at)")
+        
         conn.commit()
     
     logger.info(f"Database initialized at {DB_FILE}")
@@ -394,34 +418,57 @@ def get_company_context(ticker: str) -> Dict[str, any]:
     # Get news if enabled
     if USE_NEWS_CONTEXT and NEWS_API_KEY:
         try:
-            from eventregistry import EventRegistry, QueryArticlesIter
+            from newsapi import NewsApiClient
             
-            er = EventRegistry(apiKey=NEWS_API_KEY)
+            newsapi = NewsApiClient(api_key=NEWS_API_KEY)
             
-            # Search for company news using BOTH ticker symbol AND company name for relevance
-            # This prevents getting irrelevant results (e.g., "NICE" the word vs NICE the company)
-            company_name = context.get('company_name', '')
-            search_query = f'"{ticker}" stock' if company_name else ticker
+            # Get company name for better search
+            company_name = context.get('company_name', ticker)
             
-            q = QueryArticlesIter(
-                keywords=search_query,
-                lang="eng",
-                dateStart=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
-                dateEnd=datetime.now().strftime('%Y-%m-%d')
+            # Search for news mentioning the ticker
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            
+            # Try multiple search queries to catch relevant news
+            all_articles = newsapi.get_everything(
+                q=f'{ticker} OR "{company_name}"',
+                from_param=week_ago,
+                language='en',
+                sort_by='relevancy',
+                page_size=10
             )
             
+            # Filter articles that actually mention the ticker symbol
             articles = []
-            for article in q.execQuery(er, sortBy="rel", maxItems=3):
-                articles.append({
-                    "title": article.get("title", ""),
-                    "description": article.get("body", "")[:200] + "..." if article.get("body") else "",
-                    "url": article.get("url", ""),
-                    "published_at": article.get("dateTime", "")
-                })
+            for article in all_articles.get('articles', []):
+                title = article.get('title', '')
+                description = article.get('description', '')
+                content = article.get('content', '')
+                
+                # Check if ticker with $ OR company name appears
+                # This ensures we get actual stock news about the company
+                full_text = f"{title} {description} {content}"
+                
+                # Look for $TICKER (e.g., $ALMS) OR company name (e.g., "Alumis")
+                ticker_upper = ticker.upper()
+                has_dollar_ticker = f"${ticker_upper}" in full_text.upper()
+                has_company_name = company_name.lower() in full_text.lower() if company_name and len(company_name) > 3 else False
+                
+                if has_dollar_ticker or has_company_name:
+                    articles.append({
+                        "title": title,
+                        "description": description or "",
+                        "url": article.get('url', ''),
+                        "published_at": article.get('publishedAt', ''),
+                        "image_url": article.get('urlToImage', '')
+                    })
+                
+                # Limit to 3 most relevant articles
+                if len(articles) >= 3:
+                    break
             
             if articles:
                 context["news"] = articles
-                logger.info(f"Fetched {len(context['news'])} news articles for {ticker}")
+                logger.info(f"Fetched {len(articles)} ticker-relevant news articles for {ticker}")
         
         except Exception as e:
             logger.warning(f"Could not fetch news for {ticker}: {e}")
@@ -1076,6 +1123,11 @@ CONFIDENCE: {confidence}/5
 MARKET DATA:"""
         
         # Add relevant context
+        if context.get("sector"):
+            prompt += f"\n• Sector: {context['sector']}"
+        if context.get("market_cap"):
+            mc_billions = context["market_cap"] / 1e9
+            prompt += f"\n• Market Cap: ${mc_billions:.1f}B"
         if context.get("price_change_5d"):
             prompt += f"\n• 5D: {context['price_change_5d']:+.1f}%"
         if context.get("price_change_1m"):
@@ -1084,11 +1136,13 @@ MARKET DATA:"""
             si = context['short_interest']*100
             prompt += f"\n• Short Interest: {si:.1f}%" + (" (SQUEEZE RISK!)" if si > 15 else "")
         if context.get("pe_ratio"):
-            prompt += f"\n• P/E: {context['pe_ratio']:.1f}"
+            pe = context['pe_ratio']
+            pe_note = " (undervalued)" if pe < 15 else " (expensive)" if pe > 30 else ""
+            prompt += f"\n• P/E: {pe:.1f}{pe_note}"
         if context.get("distance_from_52w_low"):
             prompt += f"\n• From 52W Low: +{context['distance_from_52w_low']:.1f}%"
         
-        # Congressional alignment
+        # Congressional alignment - highlight proven track record
         congressional_trades = context.get("congressional_trades", [])
         ticker = alert.ticker
         congressional_buys = [
@@ -1098,7 +1152,8 @@ MARKET DATA:"""
         ]
         if congressional_buys:
             politicians = [t.get('politician', 'Unknown') for t in congressional_buys[:2]]
-            prompt += f"\n• 🏛️ CONGRESSIONAL ALIGNMENT: {len(congressional_buys)} politicians buying ({', '.join(politicians)})"
+            prompt += f"\n• 🏛️ **CONGRESSIONAL ALIGNMENT**: {len(congressional_buys)} politicians with proven track records buying ({', '.join(politicians)})"
+            prompt += "\n  NOTE: These are HIGH-CONVICTION traders who consistently outperform the market"
         
         # Signal-specific details
         if "num_insiders" in alert.details:
@@ -1112,16 +1167,39 @@ MARKET DATA:"""
         if "investor" in alert.details:
             prompt += f"\n• Strategic buyer: {alert.details['investor']}"
         
+        # Add recent news headlines for context
+        if context.get("news") and len(context["news"]) > 0:
+            prompt += "\n\nRECENT NEWS:"
+            for news_item in context["news"][:3]:
+                prompt += f"\n• {news_item['title']}"
+                if news_item.get('description'):
+                    prompt += f"\n  {news_item['description']}"
+        
         prompt += """
 
-TASK: Provide sharp, contrarian analysis in 3-4 sentences max:
-1. KEY INSIGHT: What's the non-obvious edge here? (e.g., "Insiders buying while shorts are trapped", "Congressional alignment suggests regulatory tailwind", "Dip buying at support")
-2. CATALYSTS: What could drive this higher? Be specific.
-3. RISKS: What could go wrong? One sentence.
-4. RECOMMENDATION: STRONG BUY / BUY / HOLD / WAIT (with price target or condition)
+TASK: Provide sharp, professional analysis formatted in clear paragraphs:
 
-Write like you're briefing a PM who will risk $1M+ on this. No fluff. No explaining basics. Sharp, actionable alpha only.
-DO NOT start with "Here's the analysis:" or any preamble. DO NOT use ** markdown. Start directly with your insight."""
+**KEY INSIGHT** (2-3 sentences):
+What's the non-obvious edge here? Reference P/E, short interest, sector dynamics, and price action. Be critical - insider buying doesn't guarantee success.
+
+**CATALYSTS** (2 sentences):
+What sector-specific or technical factors could drive this? Be specific to the metrics shown.
+
+**RISKS** (2 sentences):
+What could go wrong? Consider valuation, sector headwinds, technical weakness.
+
+**RECOMMENDATION**:
+Be honest based on the full picture. Use STRONG BUY only if metrics are exceptional. Use BUY if solid but not perfect. Use HOLD if mixed signals. Use WAIT if overvalued or weak momentum.
+
+CRITICAL RULES:
+- Insider buying is just ONE signal - don't automatically recommend STRONG BUY
+- High P/E (>30) should trigger caution
+- Negative price momentum should be acknowledged  
+- Be skeptical and balanced - this is real money
+- If Congressional alignment shows proven traders, emphasize this as a strong signal
+- Base analysis ONLY on data provided above
+
+Format your response with bold section headers and clear paragraph breaks. DO NOT use markdown ** for bold - just write naturally with good structure."""
         
         # Call Ollama API
         response = requests.post(
@@ -1155,7 +1233,14 @@ DO NOT start with "Here's the analysis:" or any preamble. DO NOT use ** markdown
                 if insight.startswith(prefix):
                     insight = insight[len(prefix):].strip()
             
-            # Convert markdown ** to HTML <strong> tags for email
+            # Format the insight with HTML bold tags and line breaks
+            # Replace section headers with bold HTML tags
+            insight = insight.replace("KEY INSIGHT", "<strong>KEY INSIGHT</strong><br>")
+            insight = insight.replace("CATALYSTS", "<br><br><strong>CATALYSTS</strong><br>")
+            insight = insight.replace("RISKS", "<br><br><strong>RISKS</strong><br>")
+            insight = insight.replace("RECOMMENDATION", "<br><br><strong>RECOMMENDATION</strong><br>")
+            
+            # Clean up any remaining ** markdown
             insight = insight.replace("**", "")
             
             if insight:
@@ -1703,6 +1788,72 @@ def parse_openinsider(html: str) -> pd.DataFrame:
     df = normalize_dataframe(df)
     
     return df
+
+
+def store_openinsider_trades(df: pd.DataFrame) -> int:
+    """
+    Store OpenInsider trades in database, skipping duplicates.
+    
+    Args:
+        df: DataFrame of OpenInsider trades
+        
+    Returns:
+        Number of new trades inserted
+    """
+    new_count = 0
+    duplicate_count = 0
+    
+    with get_db() as conn:
+        for _, row in df.iterrows():
+            try:
+                # Extract data
+                ticker = row.get('Ticker', '').strip().upper()
+                company_name = row.get('Company Name', '')
+                insider_name = row.get('Insider Name', '')
+                insider_title = row.get('Title', '')
+                trade_type = row.get('Trade Type', '')
+                
+                # Handle trade date
+                trade_date = row.get('Trade Date')
+                if pd.notna(trade_date):
+                    if isinstance(trade_date, pd.Timestamp):
+                        trade_date_str = trade_date.strftime('%Y-%m-%d')
+                    else:
+                        trade_date_str = str(trade_date)
+                else:
+                    trade_date_str = None
+                
+                value = row.get('Value', 0)
+                qty = row.get('Qty', 0)
+                owned = row.get('Owned', 0)
+                delta_own = row.get('Delta Own')
+                price = row.get('Price')
+                
+                # Skip if missing critical data
+                if not ticker or not insider_name or not trade_date_str:
+                    continue
+                
+                # Try to insert (will fail on duplicate)
+                conn.execute("""
+                    INSERT INTO openinsider_trades 
+                    (ticker, company_name, insider_name, insider_title, trade_type, 
+                     trade_date, value, qty, owned, delta_own, price)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (ticker, company_name, insider_name, insider_title, trade_type,
+                      trade_date_str, value, qty, owned, delta_own, price))
+                
+                new_count += 1
+                
+            except sqlite3.IntegrityError:
+                # Duplicate - skip
+                duplicate_count += 1
+            except Exception as e:
+                logger.warning(f"Error storing OpenInsider trade: {e}")
+        
+        conn.commit()
+    
+    logger.info(f"Stored {new_count} new OpenInsider trades, {duplicate_count} duplicates skipped")
+    return new_count
 
 
 def filter_by_lookback(df: pd.DataFrame, lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
@@ -2544,7 +2695,7 @@ def format_email_html(alert: InsiderAlert) -> str:
             .link-button {{
                 display: inline-block;
                 background-color: #3498db;
-                color: white;
+                color: white !important;
                 padding: 10px 20px;
                 text-decoration: none;
                 border-radius: 5px;
@@ -2584,11 +2735,9 @@ def format_email_html(alert: InsiderAlert) -> str:
         """
         
     elif "politician" in alert.details:
-        # High-conviction Congressional trade
+        # High-conviction Congressional trade - only show if known trader
         html += f"""
             <div class="signal-box">
-                <div class="signal-item"><strong>👤 Politician:</strong> {alert.details['politician']}</div>
-                <div class="signal-item"><strong>📅 Date:</strong> {alert.details['date']}</div>
                 <div class="signal-item"><strong>⭐ Known Trader:</strong> Proven track record</div>
             </div>
         """
@@ -2604,6 +2753,7 @@ def format_email_html(alert: InsiderAlert) -> str:
                 <th>Name</th>
                 <th>Role</th>
                 <th>Type</th>
+                <th>Price</th>
                 <th>Amount</th>
             </tr>
     """
@@ -2676,13 +2826,20 @@ def format_email_html(alert: InsiderAlert) -> str:
             
             role = f"{party} {chamber}".strip() if party or chamber else "Congressman"
         else:
-            # Corporate insider - use title
+            # Corporate insider - use title and clean up abbreviations
             if 'Title' in row and pd.notna(row.get('Title')):
                 role = str(row['Title'])
             elif 'Title Normalized' in row and pd.notna(row.get('Title Normalized')):
                 role = str(row['Title Normalized'])
             else:
                 role = "Insider"
+            
+            # Expand common abbreviations
+            role = role.replace("10%", "10%+ Owner")
+            role = role.replace("Dir", "Director") if role == "Dir" else role
+            role = role.replace("Pres", "President") if role == "Pres" else role
+            role = role.replace("VP", "Vice President") if role == "VP" else role
+            role = role.replace("GC", "General Counsel") if role == "GC" else role
         
         # Format name for Congressional trades
         if '(' in name and ')' in name:
@@ -2705,12 +2862,19 @@ def format_email_html(alert: InsiderAlert) -> str:
         
         type_color = "#27ae60" if trans_type == "P" else "#e74c3c"
         
+        # Price column
+        price_cell = "—"
+        if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
+            try:
+                price_val = float(row["Price"])
+                price_cell = f"${price_val:.2f}"
+            except:
+                price_cell = str(row["Price"])
+        
         # Amount column
         value_cell = ""
         if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
             value_cell = str(row["Size Range"])
-            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
-                value_cell += f" @ {row['Price']}"
         elif pd.notna(row.get('Value')) and row['Value'] > 0:
             value_cell = f"${row['Value']:,.0f}"
         
@@ -2722,6 +2886,7 @@ def format_email_html(alert: InsiderAlert) -> str:
                 <td>{name[:50]}</td>
                 <td>{role[:30]}</td>
                 <td style="color:{type_color}; font-weight:500;">{trans_type}</td>
+                <td>{price_cell}</td>
                 <td>{value_cell}</td>
             </tr>
         """
@@ -2749,12 +2914,7 @@ def format_email_html(alert: InsiderAlert) -> str:
         if context.get("price_change_5d") is not None or context.get("price_change_1m") is not None:
             html += "<h2>📊 Price Action</h2>"
             
-            # Chart and price changes side by side
-            html += '<table style="width:100%; border-collapse:collapse;"><tr>'
-            html += f'<td style="width:65%; vertical-align:top;"><img src="https://finviz.com/chart.ashx?t={alert.ticker}&ty=c&ta=1&p=d&s=l" alt="{alert.ticker} Chart" style="width:100%; height:auto; border:1px solid #ddd; border-radius:5px;"></td>'
-            html += '<td style="width:35%; vertical-align:top; padding-left:15px;">'
-            
-            # Price changes from yfinance
+            # Price changes ABOVE the chart
             try:
                 import yfinance as yf
                 stock = yf.Ticker(alert.ticker)
@@ -2773,18 +2933,18 @@ def format_email_html(alert: InsiderAlert) -> str:
                         ('5Y', 1260, '5-year')
                     ]
                     
-                    # Use flexbox for mobile-responsive layout
-                    html += '<div style="display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;">'
+                    # Use flexbox for mobile-responsive layout - span full width
+                    html += '<div style="display:flex; flex-wrap:nowrap; gap:4px; margin:8px 0 20px 0; overflow-x:auto;">'
                     for label, days, desc in timeframes:
                         if len(hist) > days:
                             past = hist['Close'].iloc[-days-1]
                             change = ((current - past) / past) * 100
                             color = '#27ae60' if change > 0 else '#e74c3c'
-                            html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>{label}:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change:+.1f}%</span></div>'
+                            html += f'<div style="flex: 1 1 0; min-width:70px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>{label}:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change:+.1f}%</span></div>'
                     html += '</div>'
             except:
                 # Fallback to context data if yfinance fails
-                html += '<div style="display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;">'
+                html += '<div style="display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 20px 0;">'
                 if context.get("price_change_5d") is not None:
                     change_5d = context["price_change_5d"]
                     color = '#27ae60' if change_5d > 0 else '#e74c3c'
@@ -2795,14 +2955,15 @@ def format_email_html(alert: InsiderAlert) -> str:
                     html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>1M:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_1m:+.1f}%</span></div>'
                 html += '</div>'
             
-            html += '</td></tr></table>'
+            # Chart below price changes
+            html += f'<img src="https://finviz.com/chart.ashx?t={alert.ticker}&ty=c&ta=1&p=d&s=l" alt="{alert.ticker} Chart" style="width:100%; height:auto; border:1px solid #ddd; border-radius:5px; margin-top:10px;">'
         
         # 52-week range as boxes below chart
         if context.get("week_52_high") and context.get("week_52_low") and context.get("current_price"):
             html += '<table style="width:100%; border-collapse:collapse; margin-top:10px;"><tr>'
-            html += f'<td style="background:#f5f5f5; padding:15px; width:33%; text-align:center; border-right:2px solid white;"><strong>52W High</strong><br><span style="font-size:0.9em;">${context["week_52_high"]:.2f}</span></td>'
-            html += f'<td style="background:#f5f5f5; padding:15px; width:33%; text-align:center; border-right:2px solid white;"><strong>52W Low</strong><br><span style="font-size:0.9em;">${context["week_52_low"]:.2f}</span></td>'
-            html += f'<td style="background:#f5f5f5; padding:15px; width:33%; text-align:center;"><strong>Current</strong><br><span style="font-size:0.9em;">${context["current_price"]:.2f}</span></td>'
+            html += f'<td style="background:#f5f5f5; padding:20px 15px; width:33%; text-align:center; border-right:2px solid white;"><div style="font-size:1.8em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">${context["week_52_low"]:.2f}</div><div style="font-size:0.85em; color:#7f8c8d;">52W Low</div></td>'
+            html += f'<td style="background:#f5f5f5; padding:20px 15px; width:33%; text-align:center; border-right:2px solid white;"><div style="font-size:1.8em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">${context["current_price"]:.2f}</div><div style="font-size:0.85em; color:#7f8c8d;">Current</div></td>'
+            html += f'<td style="background:#f5f5f5; padding:20px 15px; width:33%; text-align:center;"><div style="font-size:1.8em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">${context["week_52_high"]:.2f}</div><div style="font-size:0.85em; color:#7f8c8d;">52W High</div></td>'
             html += '</tr></table>'
         
         # Market data
@@ -2811,34 +2972,20 @@ def format_email_html(alert: InsiderAlert) -> str:
             html += '<table style="width:100%; border-collapse:collapse;"><tr>'
             
             if context.get("sector"):
-                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>Sector</strong><br><span style="font-size:0.9em;">{context["sector"]}</span></td>'
+                html += f'<td style="background:#f5f5f5; padding:20px 15px; width:25%; text-align:center; border-right:2px solid white;"><div style="font-size:1.5em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">{context["sector"]}</div><div style="font-size:0.85em; color:#7f8c8d;">Sector</div></td>'
             if context.get("market_cap"):
                 mc_billions = context["market_cap"] / 1e9
                 border_style = "border-right:2px solid white;" if context.get("pe_ratio") or context.get("short_interest") else ""
-                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; {border_style}"><strong>Market Cap</strong><br><span style="font-size:0.9em;">${mc_billions:.1f}B</span></td>'
+                html += f'<td style="background:#f5f5f5; padding:20px 15px; width:25%; text-align:center; {border_style}"><div style="font-size:1.5em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">${mc_billions:.1f}B</div><div style="font-size:0.85em; color:#7f8c8d;">Market Cap</div></td>'
             if context.get("pe_ratio"):
                 border_style = "border-right:2px solid white;" if context.get("short_interest") else ""
-                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; {border_style}"><strong>P/E Ratio</strong><br><span style="font-size:0.9em;">{context["pe_ratio"]:.1f}</span></td>'
+                html += f'<td style="background:#f5f5f5; padding:20px 15px; width:25%; text-align:center; {border_style}"><div style="font-size:1.5em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">{context["pe_ratio"]:.1f}</div><div style="font-size:0.85em; color:#7f8c8d;">P/E Ratio</div></td>'
             if context.get("short_interest"):
                 si_pct = context["short_interest"] * 100
                 emoji = "🔥" if si_pct > 15 else ""
-                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center;"><strong>Short Interest</strong><br><span style="font-size:0.9em;">{emoji}{si_pct:.1f}%</span></td>'
+                html += f'<td style="background:#f5f5f5; padding:20px 15px; width:25%; text-align:center;"><div style="font-size:1.5em; font-weight:bold; color:#2c3e50; margin-bottom:5px;">{emoji}{si_pct:.1f}%</div><div style="font-size:0.85em; color:#7f8c8d;">Short Interest</div></td>'
             
             html += '</tr></table>'
-        
-        # News section
-        if context.get("news") and len(context["news"]) > 0:
-            html += "<h2>📰 Recent News</h2>"
-            html += "<ul class='trade-list'>"
-            for news_item in context["news"][:3]:
-                title = news_item.get("title", "")
-                url = news_item.get("url", "")
-                if title:
-                    if url:
-                        html += f"<li><a href='{url}' style='color:#3498db;text-decoration:none;' target='_blank'>{title}</a></li>"
-                    else:
-                        html += f"<li>{title}</li>"
-            html += "</ul>"
         
         # Congressional trades
         if context.get("congressional_trades"):
@@ -2940,16 +3087,39 @@ def format_email_html(alert: InsiderAlert) -> str:
                 
                 html += "</tr></table></div>"
         
-        # Confidence Score and AI Insight
-        confidence_score, score_reason = calculate_confidence_score(alert, context)
-        stars = "⭐" * confidence_score
-        html += f"""
-            <div style="text-align:center; margin:20px 0;">
-                <h2 style="margin:10px 0;">{stars} Confidence: {confidence_score}/5</h2>
-                <p style="color:#666;font-style:italic;margin:5px 0;">{score_reason}</p>
-            </div>
-        """
+        # Recent News (only show if news contains ticker mention)
+        if context.get("news") and len(context["news"]) > 0:
+            html += '<h2 style="margin-top:25px;">📰 Recent News</h2>'
+            for news_item in context["news"][:3]:
+                title = news_item.get("title", "")
+                url = news_item.get("url", "")
+                published = news_item.get("published_at", "")
+                image_url = news_item.get("image_url", "")
+                
+                # Format published date
+                pub_date = ""
+                if published:
+                    try:
+                        from dateutil import parser
+                        dt = parser.parse(published)
+                        pub_date = dt.strftime('%b %d, %Y')
+                    except:
+                        pub_date = published[:10]
+                
+                # News item card without image
+                html += '<div style="background:#f8f9fa; border-left:4px solid #3498db; padding:15px; border-radius:4px; margin-bottom:15px;">'
+                
+                if url:
+                    html += f'<a href="{url}" style="color:#2c3e50; text-decoration:none; font-weight:500; font-size:1.05em;">{title}</a>'
+                else:
+                    html += f'<span style="color:#2c3e50; font-weight:500; font-size:1.05em;">{title}</span>'
+                
+                if pub_date:
+                    html += f'<div style="color:#7f8c8d; font-size:0.85em; margin-top:4px;">{pub_date}</div>'
+                html += '</div>'
         
+        # AI Insight section
+        confidence_score, score_reason = calculate_confidence_score(alert, context)
         ai_insight = generate_ai_insight(alert, context, confidence_score)
         # Format AI insight with line breaks and bold labels for readability
         formatted_insight = ai_insight
@@ -2970,7 +3140,7 @@ def format_email_html(alert: InsiderAlert) -> str:
         formatted_insight = formatted_insight.replace(" WAIT", " <u>WAIT</u>")
         html += f"""
             <div class="ai-insight">
-                <h2 style="margin-top:0;">🧠 AI Insight (Llama 3 - Local)</h2>
+                <h2 style="margin-top:0;">🧠 AI Insight</h2>
                 <p style="margin:0;line-height:1.8;">{formatted_insight}</p>
             </div>
         """
@@ -2978,11 +3148,19 @@ def format_email_html(alert: InsiderAlert) -> str:
     except Exception as e:
         logger.warning(f"Could not add context to email: {e}")
     
-    # Footer with link
+    # Footer with link - use Capitol Trades for Congressional signals
+    is_congressional = "Congressional" in alert.signal_type
+    if is_congressional:
+        link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}"
+        link_text = "View on Capitol Trades →"
+    else:
+        link_url = f"http://openinsider.com/search?q={alert.ticker}"
+        link_text = "View on OpenInsider →"
+    
     html += f"""
             <div style="text-align:center;margin:30px 0;">
-                <a href="http://openinsider.com/search?q={alert.ticker}" class="link-button">
-                    View on OpenInsider →
+                <a href="{link_url}" class="link-button" style="color:white;">
+                    {link_text}
                 </a>
             </div>
             
@@ -3014,40 +3192,29 @@ def format_telegram_message(alert: InsiderAlert) -> str:
             text = text.replace(char, f'\\{char}')
         return text
     
+    def format_value(value):
+        """Format dollar values with K/M suffixes."""
+        if value >= 1_000_000:
+            return f"${value/1_000_000:.1f}M"
+        elif value >= 1_000:
+            return f"${value/1_000:.0f}K"
+        else:
+            return f"${value:.0f}"
+    
     msg = f"🚨 *{escape_md(alert.signal_type)}*\n\n"
     company_esc = escape_md(alert.company_name)
     ticker_esc = escape_md(alert.ticker)
     msg += f"*{ticker_esc}* \\- {company_esc}\n\n"
     
-    # Signal details
-    if "num_insiders" in alert.details:
-        msg += f"👥 {alert.details['num_insiders']} insiders\n"
-        msg += f"💰 ${alert.details['total_value']:,.0f}\n"
-        msg += f"📅 Window: {alert.details['window_days']} days\n"
-    elif "investor" in alert.details:
-        # Strategic investor (corporate buyer)
-        investor_esc = escape_md(alert.details['investor'])
-        msg += f"🏢 {investor_esc}\n"
-        msg += f"💰 ${alert.details['value']:,.0f}\n"
-        if "trade_date" in alert.details:
-            date_str = alert.details['trade_date'].strftime('%Y-%m-%d')
-            msg += f"📅 {escape_md(date_str)}\n"
-        msg += f"\n💡 *Why this matters:*\n"
-        msg += f"Corporate investors signal strategic partnerships or acquisition interest\\. "
-        msg += f"They conduct deep due diligence before investing\\.\n"
-    elif "value" in alert.details:
-        insider_esc = escape_md(alert.details['insider'])
-        title_esc = escape_md(alert.details['title'])
-        msg += f"👤 {insider_esc} \\({title_esc}\\)\n"
-        msg += f"💰 ${alert.details['value']:,.0f}\n"
-        if "trade_date" in alert.details:
-            date_str = alert.details['trade_date'].strftime('%Y-%m-%d')
-            msg += f"📅 {escape_md(date_str)}\n"
-    
-    # Top trades (max 3 for brevity)
+    # Top trades (max 5 for brevity)
     msg += f"\n📊 *Trades:*\n"
-    for idx, (_, row) in enumerate(alert.trades.head(3).iterrows()):
-        date = row["Trade Date"].strftime('%m/%d') if pd.notna(row["Trade Date"]) else "?"
+    for idx, (_, row) in enumerate(alert.trades.head(5).iterrows()):
+        # Trade Date format: "15Nov" (day + 3-letter month)
+        if pd.notna(row.get("Trade Date")):
+            trade_date = row["Trade Date"]
+            date = f"{trade_date.day}{trade_date.strftime('%b')}"
+        else:
+            date = "?"
         
         # Format insider name - for Congressional trades, shorten to "Initial. LastName (Party)"
         insider_name = row['Insider Name']
@@ -3081,7 +3248,7 @@ def format_telegram_message(alert: InsiderAlert) -> str:
                 trade_line += f" @ {price_val}"
         # For corporate insider trades, show dollar value
         elif pd.notna(row['Value']) and row['Value'] > 0:
-            value_esc = escape_md(f"${row['Value']:,.0f}")
+            value_esc = escape_md(format_value(row['Value']))
             trade_line += f" \\- {value_esc}"
         
         # Add ownership change % if available and not empty (corporate insiders only)
@@ -3095,118 +3262,33 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         
         msg += trade_line + "\n"
     
-    if len(alert.trades) > 3:
-        msg += f"• \\.\\.\\.\\+{len(alert.trades) - 3} more\n"
+    if len(alert.trades) > 5:
+        msg += f"• \\.\\.\\.\\+{len(alert.trades) - 5} more\n"
     
     # Add company context if available
     try:
         context = get_company_context(alert.ticker)
         
-        # Price Action
-        if context.get("price_change_5d") is not None or context.get("price_change_1m") is not None:
-            msg += f"\n📊 *Price Action:*\n"
-            if context.get("price_change_5d") is not None:
-                change_5d = context["price_change_5d"]
-                emoji = "🟢" if change_5d > 0 else "🔴"
-                change_5d_str = f"{change_5d:+.1f}"
-                msg += f"• 5\\-day: {emoji} {escape_md(change_5d_str)}%\n"
-            if context.get("price_change_1m") is not None:
-                change_1m = context["price_change_1m"]
-                emoji = "🟢" if change_1m > 0 else "🔴"
-                change_1m_str = f"{change_1m:+.1f}"
-                msg += f"• 1\\-month: {emoji} {escape_md(change_1m_str)}%\n"
-        
-        # 52-week range
-        if context.get("week_52_high") and context.get("week_52_low") and context.get("current_price"):
-            msg += f"\n📏 *52\\-Week Range:*\n"
-            high_str = f"{context['week_52_high']:.2f}"
-            low_str = f"{context['week_52_low']:.2f}"
-            curr_str = f"{context['current_price']:.2f}"
-            msg += f"• High: \\${escape_md(high_str)}\n"
-            msg += f"• Low: \\${escape_md(low_str)}\n"
-            msg += f"• Current: \\${escape_md(curr_str)}\n"
-            
-            if context.get("distance_from_52w_low") is not None:
-                dist_low = context["distance_from_52w_low"]
-                dist_low_str = f"{dist_low:.1f}"
-                msg += f"• {escape_md(dist_low_str)}% above 52w low\n"
-        
-        # Company description (first sentence only)
-        if context.get("description"):
-            desc = context["description"].split('.')[0] + '.'
-            if len(desc) > 150:
-                desc = desc[:147] + '...'
-            msg += f"\n🏢 *About:*\n{escape_md(desc)}\n"
-        
-        # Market data
-        if context.get("market_cap") or context.get("pe_ratio") or context.get("sector") or context.get("short_interest"):
-            msg += f"\n📈 *Market Data:*\n"
-            if context.get("sector"):
-                msg += f"• Sector: {escape_md(context['sector'])}\n"
-            if context.get("market_cap"):
-                mc_billions = context["market_cap"] / 1e9
-                mc_str = f"{mc_billions:.1f}"
-                msg += f"• Market Cap: \\${escape_md(mc_str)}B\n"
-            if context.get("pe_ratio"):
-                pe_str = f"{context['pe_ratio']:.1f}"
-                msg += f"• P/E Ratio: {escape_md(pe_str)}\n"
-            if context.get("short_interest"):
-                si_pct = context["short_interest"] * 100
-                si_pct_str = f"{si_pct:.1f}"
-                emoji = "🔥" if si_pct > 15 else ""
-                msg += f"• Short Interest: {emoji}{escape_md(si_pct_str)}%\n"
-        
-        # Recent news
-        if context.get("news") and len(context["news"]) > 0:
-            msg += f"\n📰 *Recent News:*\n"
-            for news_item in context["news"][:2]:  # Top 2 headlines
-                title = news_item["title"][:80] + "..." if len(news_item["title"]) > 80 else news_item["title"]
-                msg += f"• {escape_md(title)}\n"
-        
-        # Insider role context (for single insider signals)
-        if "title" in alert.details and alert.details.get("title"):
-            role_desc = get_insider_role_description(alert.details["title"])
-            msg += f"\n👔 *Insider Role:*\n{escape_md(role_desc)}\n"
-        
-        # Congressional trades (if available) - shows ALL recent trades for market intelligence
-        if context.get("congressional_trades"):
-            congressional_trades = context["congressional_trades"]
-            buys = [t for t in congressional_trades if t.get("type", "").upper() in ["BUY", "PURCHASE"]]
-            sells = [t for t in congressional_trades if t.get("type", "").upper() in ["SELL", "SALE"]]
-            
-            if buys or sells:
-                msg += f"\n🏛️ *Congressional Market Activity:*\n"
-                msg += f"_Recent trades across all stocks for context\\.\\.\\._\n\n"
-                
-                if buys:
-                    msg += f"📈 *Buys:*\n"
-                    for trade in buys[:5]:  # Show max 5 buys
-                        pol = escape_md(trade.get("politician", "Unknown")[:35])
-                        ticker_disp = escape_md(trade.get("ticker", "N/A"))
-                        date = escape_md(trade.get("date", ""))
-                        msg += f"• {ticker_disp}: {pol} \\- {date}\n"
-                    if len(buys) > 5:
-                        msg += f"• \\.\\.\\.\\+{len(buys) - 5} more\n"
-                
-                if sells:
-                    msg += f"\n📉 *Sells:*\n"
-                    for trade in sells[:3]:  # Show max 3 sells
-                        pol = escape_md(trade.get("politician", "Unknown")[:35])
-                        ticker_disp = escape_md(trade.get("ticker", "N/A"))
-                        date = escape_md(trade.get("date", ""))
-                        msg += f"• {ticker_disp}: {pol} \\- {date}\n"
-                    if len(sells) > 3:
-                        msg += f"• \\.\\.\\.\\+{len(sells) - 3} more\n"
-        
-        # Confidence Score (moved here, right before AI insight)
+        # AI-Powered Insight - extract only RECOMMENDATION section
         confidence_score, score_reason = calculate_confidence_score(alert, context)
-        stars = "⭐" * confidence_score
-        msg += f"\n{stars} *Confidence: {confidence_score}/5*\n"
-        msg += f"_{escape_md(score_reason)}_\n"
-        
-        # AI-Powered Insight - The "so what?" analysis
         ai_insight = generate_ai_insight(alert, context, confidence_score)
-        msg += f"\n🧠 *AI Insight:*\n{escape_md(ai_insight)}\n"
+        
+        # Remove HTML tags
+        ai_insight = ai_insight.replace('<br>', ' ').replace('<strong>', '').replace('</strong>', '')
+        
+        # Extract only RECOMMENDATION section
+        if 'RECOMMENDATION' in ai_insight:
+            # Get text after RECOMMENDATION
+            parts = ai_insight.split('RECOMMENDATION')
+            if len(parts) > 1:
+                recommendation = parts[1].strip()
+                # Take only first sentence or paragraph
+                recommendation = recommendation.split('\n')[0].strip()
+                msg += f"\n💡 *Recommendation:*\n{escape_md(recommendation)}\n"
+        else:
+            # Fallback: just show first 200 chars
+            short_insight = ai_insight[:200].strip()
+            msg += f"\n💡 *Recommendation:*\n{escape_md(short_insight)}\n"
     
     except Exception as e:
         logger.warning(f"Could not add context to message: {e}")
