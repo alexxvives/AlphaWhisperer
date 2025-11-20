@@ -97,7 +97,7 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 
 # OpenInsider URL
-OPENINSIDER_URL = "https://openinsider.com/latest-insider-trading"
+OPENINSIDER_URL = "http://openinsider.com/latest-insider-trading"
 
 # Title normalization mapping
 TITLE_MAPPING = {
@@ -145,7 +145,7 @@ class InsiderAlert:
     def _generate_alert_id(self) -> str:
         """Generate unique alert ID."""
         trade_str = "_".join([
-            f"{row['Ticker']}_{row['Insider Name']}_{row['Trade Date']}"
+            f"{row['Ticker']}_{row['Insider Name']}_{row.get('Traded Date', row.get('Trade Date', 'N/A'))}"
             for _, row in self.trades.iterrows()
         ])
         return f"{self.signal_type}_{trade_str}"
@@ -198,6 +198,36 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON congressional_trades(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_traded_date ON congressional_trades(traded_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON congressional_trades(scraped_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_politician_id ON congressional_trades(politician_id)")
+        
+        # Politician P&L stats table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS politician_pnl (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                politician_id TEXT NOT NULL,
+                politician_name TEXT NOT NULL,
+                party TEXT,
+                state TEXT,
+                ticker TEXT NOT NULL,
+                company_name TEXT,
+                shares_held REAL,
+                avg_cost_basis REAL,
+                current_price REAL,
+                position_value REAL,
+                unrealized_pnl REAL,
+                realized_pnl REAL,
+                total_pnl REAL,
+                return_percent REAL,
+                trades_count INTEGER,
+                status TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(politician_id, ticker)
+            )
+        """)
+        
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_politician ON politician_pnl(politician_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_ticker ON politician_pnl(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_pnl_total ON politician_pnl(total_pnl)")
         
         conn.commit()
     
@@ -319,6 +349,7 @@ def get_company_context(ticker: str) -> Dict[str, any]:
         info = stock.info
         
         # Company info
+        context["company_name"] = info.get("longName", info.get("shortName", ticker))
         context["description"] = info.get("longBusinessSummary", "")
         context["sector"] = info.get("sector", "")
         context["industry"] = info.get("industry", "")
@@ -474,14 +505,14 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
             return []
 
 
-def scrape_all_congressional_trades_to_db(days: int = 30, max_pages: int = 10):
+def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500):
     """
-    Scrape ALL Congressional trades for last N days and store in database.
+    Scrape ALL Congressional trades and store in database.
     This is the main bulk scraping function with pagination support.
     
     Args:
-        days: Number of days to look back (30, 90, or 365)
-        max_pages: Maximum number of pages to scrape (default 10, enough for 30 days with 96/page)
+        days: Number of days to look back (30, 90, 365, or None for ALL TIME - 3 YEARS filter)
+        max_pages: Maximum number of pages to scrape (default 500 to handle all historical data)
     """
     driver = None
     new_trades_count = 0
@@ -512,8 +543,10 @@ def scrape_all_congressional_trades_to_db(days: int = 30, max_pages: int = 10):
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(20)
         
-        # Navigate to trades page
-        driver.get("https://www.capitoltrades.com/trades")
+        # Navigate to trades page with pageSize parameter
+        url = "https://www.capitoltrades.com/trades?pageSize=96"
+        logger.info(f"Loading: {url}")
+        driver.get(url)
         time.sleep(4)
         
         # Dismiss cookie banner if present
@@ -527,50 +560,6 @@ def scrape_all_congressional_trades_to_db(days: int = 30, max_pages: int = 10):
                     break
         except:
             pass
-        
-        # Click the time filter dropdown to select timeframe
-        try:
-            dropdown = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".dropdown-selector.q-flyout--plain"))
-            )
-            dropdown.click()
-            time.sleep(1)
-            
-            # Select the appropriate timeframe option
-            timeframe_text = f"{days} DAYS" if days < 365 else "3 YEARS"
-            options = driver.find_elements(By.TAG_NAME, "button")
-            for option in options:
-                if timeframe_text in option.text.upper():
-                    option.click()
-                    logger.info(f"Selected timeframe: {timeframe_text}")
-                    time.sleep(3)
-                    break
-        except Exception as e:
-            logger.warning(f"Could not set timeframe filter: {e}. Continuing with default...")
-        
-        # Increase page size to 96 records (if available)
-        try:
-            # Scroll to bottom first to ensure element is in view
-            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-            time.sleep(1)
-            
-            # Find the "show more" button with class containing "right-px"
-            show_more_buttons = driver.find_elements(By.CSS_SELECTOR, ".absolute.right-px.flex.items-center")
-            if show_more_buttons:
-                # Use JavaScript click to avoid interception
-                driver.execute_script("arguments[0].click();", show_more_buttons[0])
-                time.sleep(1)
-                
-                # Look for 96 option
-                options = driver.find_elements(By.TAG_NAME, "button")
-                for option in options:
-                    if '96' in option.text:
-                        driver.execute_script("arguments[0].click();", option)
-                        logger.info("Set page size to 96 records")
-                        time.sleep(3)
-                        break
-        except Exception as e:
-            logger.warning(f"Could not increase page size: {e}")
         
         # Scrape all pages (with max limit)
         while total_pages < max_pages:
@@ -668,7 +657,7 @@ def scrape_all_congressional_trades_to_db(days: int = 30, max_pages: int = 10):
                     price_numeric = None
                     
                     from datetime import datetime
-                    today_str = datetime.now().strftime("%d %b")
+                    current_year = datetime.now().year
                     
                     for cell in cells:
                         cell_text = cell.get_text(strip=True)
@@ -677,20 +666,39 @@ def scrape_all_congressional_trades_to_db(days: int = 30, max_pages: int = 10):
                         if not published_date:
                             time_match = re.search(r'\d{1,2}:\d{2}', cell_text)
                             if time_match:
-                                published_date = today_str  # Published today
+                                # Published today - store as YYYY-MM-DD
+                                published_date = datetime.now().strftime("%Y-%m-%d")
                             elif any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                                                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                                match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
+                                # Extract date and year together - format is like "2 Nov2025"
+                                match = re.search(r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(20\d{2})?', cell_text)
                                 if match:
-                                    published_date = match.group(1)
+                                    day = match.group(1)
+                                    month = match.group(2)
+                                    year = match.group(3) if match.group(3) else current_year
+                                    # Convert to YYYY-MM-DD format
+                                    try:
+                                        date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
+                                        published_date = date_obj.strftime("%Y-%m-%d")
+                                    except:
+                                        pass
                         
                         # Match traded date (second date found)
                         elif not traded_date:
                             if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                                                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                                match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
+                                # Extract date and year together - format is like "2 Nov2025"
+                                match = re.search(r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(20\d{2})?', cell_text)
                                 if match:
-                                    traded_date = match.group(1)
+                                    day = match.group(1)
+                                    month = match.group(2)
+                                    year = match.group(3) if match.group(3) else current_year
+                                    # Convert to YYYY-MM-DD format
+                                    try:
+                                        date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
+                                        traded_date = date_obj.strftime("%Y-%m-%d")
+                                    except:
+                                        pass
                         
                         # Match "Filed After" days - look in q-value span
                         if not filed_after_days:
@@ -1306,19 +1314,38 @@ def calculate_confidence_score(alert: InsiderAlert, context: Dict) -> tuple[int,
     score = 0
     reasons = []
     
-    # Signal type scoring (0-2 points)
-    if alert.signal_type == "Cluster Buying":
-        score += 2
-        reasons.append("Multiple insiders buying")
-    elif alert.signal_type == "Strategic Investor Buy":
-        score += 2
-        reasons.append("Corporate strategic investment")
-    elif alert.signal_type == "CEO/CFO Buy":
-        score += 1.5
-        reasons.append("C-suite executive buying")
-    elif alert.signal_type == "Large Single Buy":
-        score += 1
-        reasons.append("Significant purchase size")
+    # Congressional signals get different scoring
+    is_congressional = "Congressional" in alert.signal_type or "Bipartisan" in alert.signal_type
+    
+    if is_congressional:
+        # Congressional signal scoring (0-3 points for signal type)
+        if "Bipartisan" in alert.signal_type:
+            score += 3
+            reasons.append("Bipartisan Congressional agreement")
+        elif "Cluster" in alert.signal_type:
+            num_pols = alert.details.get("num_politicians", 2)
+            score += 2.5
+            reasons.append(f"{num_pols} politicians buying")
+        elif "High-Conviction" in alert.signal_type:
+            score += 2
+            reasons.append("Known successful Congressional trader")
+        else:
+            score += 2
+            reasons.append("Congressional insider activity")
+    else:
+        # Corporate insider signal type scoring (0-2 points)
+        if alert.signal_type == "Cluster Buying":
+            score += 2
+            reasons.append("Multiple insiders buying")
+        elif alert.signal_type == "Strategic Investor Buy":
+            score += 2
+            reasons.append("Corporate strategic investment")
+        elif alert.signal_type == "CEO/CFO Buy":
+            score += 1.5
+            reasons.append("C-suite executive buying")
+        elif alert.signal_type == "Large Single Buy":
+            score += 1
+            reasons.append("Significant purchase size")
     
     # Purchase size (0-1 points)
     total_value = alert.details.get("total_value") or alert.details.get("value", 0)
@@ -1527,6 +1554,9 @@ def normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         Cleaned and normalized DataFrame
     """
     logger.debug(f"Normalizing DataFrame with {len(df)} rows")
+    
+    # First, fix column names - replace non-breaking spaces with regular spaces
+    df.columns = [str(col).replace('\xa0', ' ').strip() for col in df.columns]
     
     # Standardize column names
     column_mapping = {
@@ -1754,7 +1784,7 @@ def detect_cluster_buying(df: pd.DataFrame) -> List[InsiderAlert]:
 
 def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
-    Detect CEO/CFO buy: Any CEO or CFO buys ≥ MIN_CEO_CFO_BUY.
+    Detect C-Suite buy: Any C-Suite executive buys ≥ MIN_CEO_CFO_BUY.
     
     Args:
         df: Trades DataFrame
@@ -1764,10 +1794,17 @@ def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
     alerts = []
     
-    # Filter to CEO/CFO buys
+    # C-Suite titles to include
+    c_suite_titles = [
+        "CEO", "CFO", "COO", "President", "Pres", 
+        "Chief Executive Officer", "Chief Financial Officer", "Chief Operating Officer",
+        "VP", "Vice President", "GC", "General Counsel", "Officer"
+    ]
+    
+    # Filter to C-Suite buys
     exec_buys = df[
         (df["Trade Type"] == "Buy") &
-        (df["Title Normalized"].isin(["CEO", "CFO"])) &
+        (df["Title Normalized"].isin(c_suite_titles)) &
         (df["Value"] >= MIN_CEO_CFO_BUY)
     ].copy()
     
@@ -1775,7 +1812,7 @@ def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
         company_name = row.get("Company Name", row["Ticker"])
         
         alert = InsiderAlert(
-            signal_type="CEO/CFO Buy",
+            signal_type="C-Suite Buy",
             ticker=row["Ticker"],
             company_name=company_name,
             trades=pd.DataFrame([row]),
@@ -1788,7 +1825,7 @@ def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
         )
         alerts.append(alert)
     
-    logger.info(f"Detected {len(alerts)} CEO/CFO buy signals")
+    logger.info(f"Detected {len(alerts)} C-Suite buy signals")
     return alerts
 
 
@@ -2025,8 +2062,23 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
     if not congressional_trades:
         return alerts
     
-    # Filter to buys only
-    buys = [t for t in congressional_trades if t.get('type', '').upper() in ['BUY', 'PURCHASE']]
+    # Filter to buys only AND recent trades (last 14 days)
+    cutoff_date = datetime.now() - timedelta(days=14)
+    buys = []
+    for t in congressional_trades:
+        if t.get('type', '').upper() in ['BUY', 'PURCHASE']:
+            # Parse published date (stored as YYYY-MM-DD) to check recency
+            date_str = t.get('date', '')
+            
+            try:
+                # Parse the date (YYYY-MM-DD format)
+                pub_date = pd.to_datetime(date_str)
+                
+                if pub_date >= cutoff_date:
+                    buys.append(t)
+            except:
+                # If we can't parse the date, skip it
+                pass
     
     if len(buys) < 2:
         return alerts
@@ -2042,9 +2094,12 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
     
     # Check for clusters (MIN_CONGRESSIONAL_CLUSTER+ politicians buying same ticker)
     for ticker, trades in ticker_groups.items():
-        if len(trades) >= MIN_CONGRESSIONAL_CLUSTER:
+        # Get unique politicians for this ticker
+        unique_politicians = set(t.get('politician', '') for t in trades)
+        
+        if len(unique_politicians) >= MIN_CONGRESSIONAL_CLUSTER:
             # Check if bipartisan
-            politicians = [t.get('politician', '') for t in trades]
+            politicians = list(unique_politicians)
             has_dem = any('(D)' in p for p in politicians)
             has_rep = any('(R)' in p for p in politicians)
             is_bipartisan = has_dem and has_rep
@@ -2052,16 +2107,26 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
             # Create DataFrame for display (map Congressional fields to expected columns)
             trades_data = []
             for trade in trades:
-                # Parse date - handle formats like "16 Oct" or "2025-11-18"
-                date_str = trade.get('date', 'Recent')
+                # Parse traded date - handle formats like "16 Oct" or "2025-11-18"
+                traded_date_str = trade.get('traded_date', trade.get('date', 'Recent'))
                 try:
-                    if '-' in date_str:
-                        trade_date = pd.to_datetime(date_str)
+                    if '-' in traded_date_str:
+                        trade_date = pd.to_datetime(traded_date_str)
                     else:
                         # Format like "16 Oct" - add current year
-                        trade_date = pd.to_datetime(f"{date_str} {datetime.now().year}", format='%d %b %Y')
+                        trade_date = pd.to_datetime(f"{traded_date_str} {datetime.now().year}", format='%d %b %Y')
                 except:
                     trade_date = datetime.now()
+                
+                # Parse published date
+                published_date_str = trade.get('date', 'Recent')
+                try:
+                    if '-' in published_date_str:
+                        published_date = pd.to_datetime(published_date_str)
+                    else:
+                        published_date = pd.to_datetime(f"{published_date_str} {datetime.now().year}", format='%d %b %Y')
+                except:
+                    published_date = datetime.now()
                 
                 # Use size range as value display (e.g., "1K-15K", "100K-250K")
                 size_display = trade.get('size', '')
@@ -2069,12 +2134,13 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
                 trades_data.append({
                     "Ticker": ticker,
                     "Insider Name": trade.get('politician', 'Unknown'),
-                    "Trade Date": trade_date,
+                    "Traded Date": trade_date,
+                    "Published Date": published_date,
+                    "Filed After": trade.get('filed_after', 'N/A'),
                     "Title": trade.get('chamber', 'Congress'),
                     "Value": 0,  # Not used for Congressional (we use size_range)
                     "Size Range": size_display,
-                    "Price": trade.get('price', ''),
-                    "Delta Own": ""
+                    "Price": trade.get('price', '')
                 })
             trades_df = pd.DataFrame(trades_data)
             
@@ -2085,10 +2151,10 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
             alert = InsiderAlert(
                 signal_type=signal_type,
                 ticker=ticker,
-                company_name=ticker,  # We don't have company name from Congressional data
+                company_name=ticker,  # Will be fetched later in email formatting
                 trades=trades_df,
                 details={
-                    "num_politicians": len(trades),
+                    "num_politicians": len(unique_politicians),
                     "politicians": politicians[:5],  # First 5
                     "bipartisan": is_bipartisan,
                     "dates": [t.get('date', 'Recent') for t in trades]
@@ -2122,8 +2188,23 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
     if not congressional_trades:
         return alerts
     
-    # Filter to buys only
-    buys = [t for t in congressional_trades if t.get('type', '').upper() in ['BUY', 'PURCHASE']]
+    # Filter to buys only AND recent trades (last 14 days)
+    cutoff_date = datetime.now() - timedelta(days=14)
+    buys = []
+    for t in congressional_trades:
+        if t.get('type', '').upper() in ['BUY', 'PURCHASE']:
+            # Parse published date (stored as YYYY-MM-DD) to check recency
+            date_str = t.get('date', '')
+            
+            try:
+                # Parse the date (YYYY-MM-DD format)
+                pub_date = pd.to_datetime(date_str)
+                
+                if pub_date >= cutoff_date:
+                    buys.append(t)
+            except:
+                # If we can't parse the date, skip it
+                pass
     
     # Known high-performing traders (can expand this list)
     top_traders = [
@@ -2143,16 +2224,26 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
         
         if is_top_trader:
             # Create DataFrame for display (map Congressional fields to expected columns)
-            # Parse date - handle formats like "16 Oct" or "2025-11-18"
-            date_str = trade.get('date', 'Recent')
+            # Parse traded date - handle formats like "16 Oct" or "2025-11-18"
+            traded_date_str = trade.get('traded_date', trade.get('date', 'Recent'))
             try:
-                if '-' in date_str:
-                    trade_date = pd.to_datetime(date_str)
+                if '-' in traded_date_str:
+                    trade_date = pd.to_datetime(traded_date_str)
                 else:
                     # Format like "16 Oct" - add current year
-                    trade_date = pd.to_datetime(f"{date_str} {datetime.now().year}", format='%d %b %Y')
+                    trade_date = pd.to_datetime(f"{traded_date_str} {datetime.now().year}", format='%d %b %Y')
             except:
                 trade_date = datetime.now()
+            
+            # Parse published date
+            published_date_str = trade.get('date', 'Recent')
+            try:
+                if '-' in published_date_str:
+                    published_date = pd.to_datetime(published_date_str)
+                else:
+                    published_date = pd.to_datetime(f"{published_date_str} {datetime.now().year}", format='%d %b %Y')
+            except:
+                published_date = datetime.now()
             
             # Use size range as value display (e.g., "1K-15K", "100K-250K")
             size_display = trade.get('size', '')
@@ -2160,19 +2251,20 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
             trades_data = {
                 "Ticker": ticker,
                 "Insider Name": politician,
-                "Trade Date": trade_date,
+                "Traded Date": trade_date,
+                "Published Date": published_date,
+                "Filed After": trade.get('filed_after', 'N/A'),
                 "Title": trade.get('chamber', 'Congress'),
                 "Value": 0,  # Not used for Congressional (we use size_range)
                 "Size Range": size_display,
-                "Price": trade.get('price', ''),
-                "Delta Own": ""
+                "Price": trade.get('price', '')
             }
             trades_df = pd.DataFrame([trades_data])
             
             alert = InsiderAlert(
                 signal_type="High-Conviction Congressional Buy",
                 ticker=ticker,
-                company_name=ticker,
+                company_name=ticker,  # Will be fetched later in email formatting
                 trades=trades_df,
                 details={
                     "politician": politician,
@@ -2402,9 +2494,11 @@ def format_email_html(alert: InsiderAlert) -> str:
     <body>
         <div class="container">
             <div class="header">
-                <div style="font-size: 1.5em;">🚨 {alert.signal_type}</div>
-                <div class="ticker">{alert.ticker}</div>
-                <div class="company">{alert.company_name}</div>
+                <div style="font-size: 1.5em;">🚨 {alert.signal_type} 🚨</div>
+                <div style="margin-top:10px;">
+                    <span class="ticker" style="font-size:2em;">{alert.company_name if alert.company_name != alert.ticker else alert.ticker}</span>
+                    <span class="ticker" style="font-size:2em; margin-left:10px;">{f'(${alert.ticker})' if alert.company_name != alert.ticker else ''}</span>
+                </div>
             </div>
     """
     
@@ -2455,35 +2549,97 @@ def format_email_html(alert: InsiderAlert) -> str:
                 <div class="signal-item"><strong>⭐ Known Trader:</strong> Proven track record</div>
             </div>
         """
-        
-    elif "value" in alert.details:
-        # Single insider trade
-        html += """<div class="signal-box">"""
-        if "insider" in alert.details:
-            html += f"""<div class="signal-item"><strong>👤 Insider:</strong> {alert.details['insider']}</div>"""
-        if "title" in alert.details:
-            html += f"""<div class="signal-item"><strong>👔 Title:</strong> {alert.details['title']}</div>"""
-        html += f"""<div class="signal-item"><strong>💰 Value:</strong> ${alert.details['value']:,.0f}</div>"""
-        if "trade_date" in alert.details:
-            html += f"""<div class="signal-item"><strong>📅 Date:</strong> {alert.details['trade_date'].strftime('%Y-%m-%d')}</div>"""
-        html += """</div>"""
     
     # Trades table
     html += """
         <h2>📊 Trade Details</h2>
         <table class="trades-table">
             <tr>
-                <th>Date</th>
+                <th>Traded</th>
+                <th>Published</th>
+                <th>Days Past</th>
                 <th>Name</th>
+                <th>Role</th>
                 <th>Type</th>
                 <th>Amount</th>
-                <th>Δ Own</th>
             </tr>
     """
     
-    for _, row in alert.trades.head(5).iterrows():
-        date = row["Trade Date"].strftime('%m/%d/%Y') if pd.notna(row["Trade Date"]) else "N/A"
+    for _, row in alert.trades.iterrows():  # Show ALL trades instead of head(5)
+        # Check if this is a Congressional trade (has Published Date column)
+        is_congressional = "Published Date" in row and pd.notna(row.get("Published Date"))
+        
+        if is_congressional:
+            # Format as "1st Jan 2025"
+            if pd.notna(row.get("Traded Date")):
+                td = row["Traded Date"]
+                day_suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(td.day if td.day < 20 else td.day % 10, 'th')
+                traded_date = f"{td.day}{day_suffix} {td.strftime('%b %Y')}"
+            else:
+                traded_date = "N/A"
+            
+            if pd.notna(row.get("Published Date")):
+                pd_date = row["Published Date"]
+                day_suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(pd_date.day if pd_date.day < 20 else pd_date.day % 10, 'th')
+                published_date = f"{pd_date.day}{day_suffix} {pd_date.strftime('%b %Y')}"
+            else:
+                published_date = "N/A"
+            
+            filed_after = str(row.get("Filed After", "N/A"))
+        else:
+            # Corporate insider trade - use Trade Date and Filing Date
+            date_col = "Traded Date" if "Traded Date" in row else "Trade Date"
+            if pd.notna(row.get(date_col)):
+                td = row[date_col]
+                day_suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(td.day if td.day < 20 else td.day % 10, 'th')
+                traded_date = f"{td.day}{day_suffix} {td.strftime('%b %Y')}"
+            else:
+                traded_date = "N/A"
+            
+            # Filing Date (Published Date for corporate insiders)
+            if pd.notna(row.get("Filing Date")):
+                fd = row["Filing Date"]
+                day_suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(fd.day if fd.day < 20 else fd.day % 10, 'th')
+                published_date = f"{fd.day}{day_suffix} {fd.strftime('%b %Y')}"
+                
+                # Calculate Days Past
+                if pd.notna(row.get(date_col)):
+                    days_diff = (fd - row[date_col]).days
+                    filed_after = str(days_diff)
+                else:
+                    filed_after = "—"
+            else:
+                published_date = "—"
+                filed_after = "—"
+        
         name = row['Insider Name']
+        
+        # Determine role (party/chamber for Congressional, title for corporate)
+        role = ""
+        if is_congressional:
+            # Extract party and chamber for Congressional trades
+            party = ""
+            chamber = ""
+            if '(' in name and ')' in name:
+                party_match = name.split('(')[1].split(')')[0] if '(' in name else ''
+                party = party_match.strip()
+            
+            # Try to get chamber from row if available
+            if 'Chamber' in row and pd.notna(row.get('Chamber')):
+                chamber = str(row['Chamber'])
+            elif 'State' in row and pd.notna(row.get('State')):
+                # Infer it might be congressional
+                chamber = "Congress"
+            
+            role = f"{party} {chamber}".strip() if party or chamber else "Congressman"
+        else:
+            # Corporate insider - use title
+            if 'Title' in row and pd.notna(row.get('Title')):
+                role = str(row['Title'])
+            elif 'Title Normalized' in row and pd.notna(row.get('Title Normalized')):
+                role = str(row['Title Normalized'])
+            else:
+                role = "Insider"
         
         # Format name for Congressional trades
         if '(' in name and ')' in name:
@@ -2506,7 +2662,7 @@ def format_email_html(alert: InsiderAlert) -> str:
         
         type_color = "#27ae60" if trans_type == "Purchase" else "#e74c3c"
         
-        # Amount column - WITHOUT Delta Own
+        # Amount column
         value_cell = ""
         if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
             value_cell = str(row["Size Range"])
@@ -2515,27 +2671,15 @@ def format_email_html(alert: InsiderAlert) -> str:
         elif pd.notna(row.get('Value')) and row['Value'] > 0:
             value_cell = f"${row['Value']:,.0f}"
         
-        # Delta Own column - separate
-        delta_own = ""
-        if "Delta Own" in row and pd.notna(row.get("Delta Own")) and str(row["Delta Own"]).strip():
-            delta_own = str(row["Delta Own"]).strip()
-        
         html += f"""
             <tr>
-                <td>{date}</td>
+                <td>{traded_date}</td>
+                <td>{published_date}</td>
+                <td>{filed_after}</td>
                 <td>{name[:50]}</td>
+                <td>{role[:30]}</td>
                 <td style="color:{type_color}; font-weight:500;">{trans_type}</td>
                 <td>{value_cell}</td>
-                <td style="color:#27ae60; font-weight:500;">{delta_own if delta_own else '—'}</td>
-            </tr>
-        """
-    
-    if len(alert.trades) > 5:
-        html += f"""
-            <tr>
-                <td colspan="5" style="text-align:center; font-style:italic;">
-                    ...and {len(alert.trades) - 5} more trades
-                </td>
             </tr>
         """
     
@@ -2544,6 +2688,19 @@ def format_email_html(alert: InsiderAlert) -> str:
     # Add company context
     try:
         context = get_company_context(alert.ticker)
+        
+        # Update alert company_name if we got it from yfinance
+        if alert.company_name == alert.ticker:
+            try:
+                import yfinance as yf
+                stock = yf.Ticker(alert.ticker)
+                info = stock.info
+                if info.get("longName"):
+                    alert.company_name = info["longName"]
+                elif info.get("shortName"):
+                    alert.company_name = info["shortName"]
+            except:
+                pass
         
         # Price Action with chart
         if context.get("price_change_5d") is not None or context.get("price_change_1m") is not None:
@@ -2721,28 +2878,32 @@ def format_email_html(alert: InsiderAlert) -> str:
         confidence_score, score_reason = calculate_confidence_score(alert, context)
         stars = "⭐" * confidence_score
         html += f"""
-            <h2>{stars} Confidence: {confidence_score}/5</h2>
-            <p style="color:#666;font-style:italic;">{score_reason}</p>
+            <div style="text-align:center; margin:20px 0;">
+                <h2 style="margin:10px 0;">{stars} Confidence: {confidence_score}/5</h2>
+                <p style="color:#666;font-style:italic;margin:5px 0;">{score_reason}</p>
+            </div>
         """
         
         ai_insight = generate_ai_insight(alert, context, confidence_score)
         # Format AI insight with line breaks and bold labels for readability
         formatted_insight = ai_insight
-        # Bold the section labels
-        formatted_insight = formatted_insight.replace("KEY INSIGHT:", "<strong>KEY INSIGHT:</strong>")
-        formatted_insight = formatted_insight.replace("CATALYSTS:", "<strong>CATALYSTS:</strong>")
-        formatted_insight = formatted_insight.replace("RISKS:", "<strong>RISKS:</strong>")
-        formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<strong>RECOMMENDATION:</strong>")
+        # Add line breaks BEFORE section headers for better spacing
+        formatted_insight = formatted_insight.replace("CATALYSTS:", "<br><br>CATALYSTS:")
+        formatted_insight = formatted_insight.replace("RISKS:", "<br><br>RISKS:")
+        formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<br><br>RECOMMENDATION:")
+        # Bold the section labels and add break after
+        formatted_insight = formatted_insight.replace("KEY INSIGHT:", "<strong>KEY INSIGHT:</strong><br>")
+        formatted_insight = formatted_insight.replace("CATALYSTS:", "<strong>CATALYSTS:</strong><br>")
+        formatted_insight = formatted_insight.replace("RISKS:", "<strong>RISKS:</strong><br>")
+        formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<strong>RECOMMENDATION:</strong><br>")
         formatted_insight = formatted_insight.replace("STRONG BUY", "<strong>STRONG BUY</strong>")
         formatted_insight = formatted_insight.replace(" BUY ", " <strong>BUY</strong> ")
         formatted_insight = formatted_insight.replace(" HOLD", " <strong>HOLD</strong>")
         formatted_insight = formatted_insight.replace(" WAIT", " <strong>WAIT</strong>")
-        # Add line breaks
-        formatted_insight = formatted_insight.replace(". ", ".<br><br>").replace("? ", "?<br><br>")
         html += f"""
             <div class="ai-insight">
                 <h2 style="margin-top:0;">🧠 AI Insight (Llama 3 - Local)</h2>
-                <p style="margin:0;line-height:1.6;">{formatted_insight}</p>
+                <p style="margin:0;line-height:1.8;">{formatted_insight}</p>
             </div>
         """
         
@@ -2752,7 +2913,7 @@ def format_email_html(alert: InsiderAlert) -> str:
     # Footer with link
     html += f"""
             <div style="text-align:center;margin:30px 0;">
-                <a href="https://openinsider.com/search?q={alert.ticker}" class="link-button">
+                <a href="http://openinsider.com/search?q={alert.ticker}" class="link-button">
                     View on OpenInsider →
                 </a>
             </div>
@@ -3042,8 +3203,10 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     text += "=" * 70 + "\n"
     
     # Add trade rows
-    for _, row in alert.trades.head(5).iterrows():
-        trade_date = row["Trade Date"].strftime('%m/%d/%Y') if pd.notna(row["Trade Date"]) else "N/A"
+    for _, row in alert.trades.iterrows():
+        # Handle both Trade Date (corporate) and Traded Date (congressional)
+        date_col = "Traded Date" if "Traded Date" in row else "Trade Date"
+        trade_date = row[date_col].strftime('%m/%d/%Y') if pd.notna(row.get(date_col)) else "N/A"
         name = row['Insider Name']
         
         # Format name for Congressional trades
@@ -3090,7 +3253,7 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         logger.warning(f"Could not add context to text email: {e}")
     
     text += "\n" + "=" * 70 + "\n"
-    text += f"View on OpenInsider: https://openinsider.com/search?q={alert.ticker}\n"
+    text += f"View on OpenInsider: http://openinsider.com/search?q={alert.ticker}\n"
     text += f"\nAlert ID: {alert.alert_id[:16]}...\n"
     text += "\nALPHA WHISPERER - Insider Trading Intelligence\n"
     
@@ -3151,18 +3314,19 @@ def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
         return False
 
 
-def send_email_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
+def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix: str = "") -> bool:
     """
     Send email alert for detected signal.
     
     Args:
         alert: InsiderAlert object
         dry_run: If True, log email but don't send
+        subject_prefix: Optional prefix for subject line (e.g., "Signal #1: ")
         
     Returns:
         True if email sent successfully
     """
-    subject = f"[Insider Alert] {alert.ticker} — {alert.signal_type}"
+    subject = f"[Insider Alert] {subject_prefix}{alert.ticker} — {alert.signal_type}"
     
     # Format email body
     text_body = format_email_text(alert)

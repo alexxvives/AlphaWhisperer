@@ -9,31 +9,58 @@ import yfinance as yf
 from datetime import datetime
 from typing import Dict, List, Tuple
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Cache for prices to avoid repeated API calls
+_price_cache = {}
+
 
 def get_current_price(ticker: str) -> float:
-    """Get current stock price from yfinance"""
+    """Get current stock price from yfinance with caching and retry"""
+    if ticker in _price_cache:
+        return _price_cache[ticker]
+    
     try:
+        # Add delay to avoid rate limiting (increased from 0.1 to 0.5)
+        time.sleep(0.5)
+        
         stock = yf.Ticker(ticker)
-        info = stock.info
-        price = info.get('currentPrice') or info.get('regularMarketPrice')
-        if price:
-            return float(price)
+        
+        # Use history instead of info to avoid rate limits
+        hist = stock.history(period='5d')
+        if not hist.empty:
+            price = float(hist['Close'].iloc[-1])
+            _price_cache[ticker] = price
+            return price
+            
     except Exception as e:
         logger.debug(f"Could not fetch price for {ticker}: {e}")
+        # If rate limited, wait longer
+        if "Too Many Requests" in str(e) or "Rate" in str(e):
+            logger.warning(f"Rate limited, waiting 60 seconds...")
+            time.sleep(60)
+    
+    _price_cache[ticker] = None
     return None
 
 
 def get_historical_price(ticker: str, date_str: str) -> float:
     """
-    Get historical closing price for a ticker on a specific date
+    Get historical closing price for a ticker on a specific date with caching
     date_str format: "8 Oct" or "23 Oct" (assumes current year or previous year)
     """
+    cache_key = f"{ticker}_{date_str}"
+    if cache_key in _price_cache:
+        return _price_cache[cache_key]
+    
     try:
         from datetime import datetime, timedelta
+        
+        # Add delay to avoid rate limiting (increased from 0.1 to 0.5)
+        time.sleep(0.5)
         
         # Parse the date string (e.g., "8 Oct")
         current_year = datetime.now().year
@@ -61,10 +88,12 @@ def get_historical_price(ticker: str, date_str: str) -> float:
             closest_date = min(hist.index, key=lambda x: abs(x.date() - date.date()))
             price = float(hist.loc[closest_date]['Close'])
             logger.debug(f"Historical price for {ticker} on {date_str}: ${price:.2f}")
+            _price_cache[cache_key] = price
             return price
     except Exception as e:
         logger.debug(f"Could not fetch historical price for {ticker} on {date_str}: {e}")
     
+    _price_cache[cache_key] = None
     return None
 
 
@@ -120,17 +149,17 @@ def calculate_politician_pnl(politician_id: str = None) -> List[Dict]:
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Get all trades from full history table
+    # Get all trades from congressional_trades table
     if politician_id:
         query = """
-            SELECT * FROM politician_full_history 
+            SELECT * FROM congressional_trades 
             WHERE politician_id = ?
             ORDER BY traded_date ASC
         """
         cursor.execute(query, (politician_id,))
     else:
         query = """
-            SELECT * FROM politician_full_history 
+            SELECT * FROM congressional_trades 
             ORDER BY politician_id, traded_date ASC
         """
         cursor.execute(query)
@@ -138,10 +167,16 @@ def calculate_politician_pnl(politician_id: str = None) -> List[Dict]:
     trades = cursor.fetchall()
     conn.close()
     
+    if not trades:
+        return []
+    
+    logger.info(f"Processing {len(trades)} trades...")
+    
     # Track positions by politician + ticker
     # positions[politician_id][ticker] = {shares: float, cost_basis: float, trades: []}
     positions = {}
     
+    processed = 0
     for trade in trades:
         pol_id = trade['politician_id']
         ticker = trade['ticker']
@@ -206,9 +241,17 @@ def calculate_politician_pnl(politician_id: str = None) -> List[Dict]:
                     pos['shares'] = 0
             
             pos['trades_count'] += 1
+        
+        processed += 1
+        if processed % 1000 == 0:
+            logger.info(f"  Processed {processed}/{len(trades)} trades...")
+    
+    logger.info(f"Finished processing trades. Calculating current values...")
     
     # Now calculate current values and format results
     results = []
+    total_positions = sum(len(positions[pol_id]) for pol_id in positions)
+    calculated = 0
     
     for pol_id in positions:
         for ticker in positions[pol_id]:
@@ -259,7 +302,12 @@ def calculate_politician_pnl(politician_id: str = None) -> List[Dict]:
                 'trades_count': pos['trades_count'],
                 'status': 'OPEN' if pos['shares'] > 0 else 'CLOSED'
             })
+            
+            calculated += 1
+            if calculated % 100 == 0:
+                logger.info(f"  Calculated prices for {calculated}/{total_positions} positions...")
     
+    logger.info(f"P&L calculation complete: {len(results)} positions")
     return results
 
 
