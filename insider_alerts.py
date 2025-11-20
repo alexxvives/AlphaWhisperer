@@ -2094,10 +2094,33 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
     
     # Check for clusters (MIN_CONGRESSIONAL_CLUSTER+ politicians buying same ticker)
     for ticker, trades in ticker_groups.items():
-        # Get unique politicians for this ticker
-        unique_politicians = set(t.get('politician', '') for t in trades)
+        # Filter to trades ≥$50K (using max of size range)
+        significant_trades = []
+        for t in trades:
+            size_str = t.get('size', '')
+            if size_str:
+                import re
+                # Extract max value from range
+                if '-' in size_str:
+                    parts = size_str.split('-')
+                    if len(parts) == 2:
+                        max_match = re.search(r'(\d+)K', parts[1])
+                        if max_match and int(max_match.group(1)) >= 50:
+                            significant_trades.append(t)
+                else:
+                    # Single value like "100K+"
+                    match = re.search(r'(\d+)K', size_str)
+                    if match and int(match.group(1)) >= 50:
+                        significant_trades.append(t)
+        
+        if not significant_trades:
+            continue
+            
+        # Get unique politicians for this ticker (from significant trades only)
+        unique_politicians = set(t.get('politician', '') for t in significant_trades)
         
         if len(unique_politicians) >= MIN_CONGRESSIONAL_CLUSTER:
+            trades = significant_trades  # Use filtered trades
             # Check if bipartisan
             politicians = list(unique_politicians)
             has_dem = any('(D)' in p for p in politicians)
@@ -2206,10 +2229,29 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
                 # If we can't parse the date, skip it
                 pass
     
-    # Known high-performing traders (can expand this list)
+    # Known high-performing traders - politicians with documented above-average returns
     top_traders = [
-        'Nancy Pelosi', 'Josh Gottheimer', 'Michael McCaul',
-        'Tommy Tuberville', 'Dan Crenshaw', 'Brian Higgins'
+        # Top performers (frequently mentioned in trading tracking)
+        'Nancy Pelosi', 'Paul Pelosi', 'Josh Gottheimer', 'Michael McCaul',
+        'Tommy Tuberville', 'Dan Crenshaw', 'Brian Higgins', 'Mark Green',
+        'Marjorie Taylor Greene', 'Austin Scott', 'French Hill', 'Pat Fallon',
+        
+        # Senate traders
+        'Dianne Feinstein', 'Richard Burr', 'Kelly Loeffler', 'David Perdue',
+        'Sheldon Whitehouse', 'John Hoeven', 'Steve Daines', 'Gary Peters',
+        'Ron Wyden', 'Rand Paul', 'Mitt Romney', 'Mark Warner',
+        
+        # House traders - active and tracked
+        'Ro Khanna', 'Susie Lee', 'Dean Phillips', 'Kathy Manning',
+        'Nicole Malliotakis', 'Blake Moore', 'John Curtis', 'Kevin Hern',
+        'Virginia Foxx', 'Earl Blumenauer', 'Alan Lowenthal', 'Kurt Schrader',
+        'Debbie Dingell', 'Suzan DelBene', 'Scott Peters', 'Jim Himes',
+        
+        # Notable recent activity
+        'Lloyd Doggett', 'Lois Frankel', 'Josh Harder', 'Sara Jacobs',
+        'Gregory Meeks', 'Pete Sessions', 'Michael Guest', 'Barry Moore',
+        'Diana Harshbarger', 'Carol Miller', 'Randy Feenstra', 'Mike Garcia',
+        'Maria Salazar', 'Carlos Gimenez', 'Darrell Issa', 'Michelle Steel'
     ]
     
     for trade in buys:
@@ -2222,7 +2264,29 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
         # Check if this politician is a known successful trader
         is_top_trader = any(trader in politician for trader in top_traders)
         
-        if is_top_trader:
+        # Filter by minimum size (≥$50K) - parse size range
+        size_str = trade.get('size', '')
+        meets_size_threshold = False
+        
+        # Size ranges like "50K-100K", "100K-250K", "250K-500K", etc.
+        if size_str:
+            # Extract max value from range (conservative: "50K-100K" -> use 100K)
+            import re
+            match = re.search(r'(\d+)K', size_str)
+            if match:
+                max_value_k = int(match.group(1))
+                # Check if max of range is ≥50K
+                if '-' in size_str:
+                    # Get the second number (max) from "X-Y"
+                    parts = size_str.split('-')
+                    if len(parts) == 2:
+                        max_match = re.search(r'(\d+)K', parts[1])
+                        if max_match:
+                            max_value_k = int(max_match.group(1))
+                
+                meets_size_threshold = max_value_k >= 50
+        
+        if is_top_trader and meets_size_threshold:
             # Create DataFrame for display (map Congressional fields to expected columns)
             # Parse traded date - handle formats like "16 Oct" or "2025-11-18"
             traded_date_str = trade.get('traded_date', trade.get('date', 'Recent'))
@@ -2503,28 +2567,7 @@ def format_email_html(alert: InsiderAlert) -> str:
     """
     
     # Signal-specific details
-    if "num_insiders" in alert.details or "num_politicians" in alert.details:
-        # Cluster signal (corporate or Congressional)
-        num = alert.details.get('num_insiders', alert.details.get('num_politicians', 0))
-        html += f"""
-            <div class="signal-box">
-                <div class="signal-item"><strong>👥 Number:</strong> {num} {'insiders' if 'num_insiders' in alert.details else 'politicians'}</div>
-        """
-        
-        # Show all politicians for Congressional cluster buys
-        if "politicians" in alert.details:
-            politicians_list = alert.details['politicians']
-            html += f"""<div class="signal-item"><strong>👤 Politicians:</strong> {', '.join(politicians_list)}</div>"""
-        
-        if "total_value" in alert.details:
-            html += f"""<div class="signal-item"><strong>💰 Total Value:</strong> ${alert.details['total_value']:,.0f}</div>"""
-        if "window_days" in alert.details:
-            html += f"""<div class="signal-item"><strong>📅 Window:</strong> {alert.details['window_days']} days</div>"""
-        if alert.details.get("bipartisan"):
-            html += f"""<div class="signal-item"><strong>🏛️ Bipartisan:</strong> Both Democrats and Republicans</div>"""
-        html += """</div>"""
-        
-    elif "investor" in alert.details:
+    if "investor" in alert.details:
         # Strategic investor
         html += f"""
             <div class="signal-box">
@@ -2649,18 +2692,18 @@ def format_email_html(alert: InsiderAlert) -> str:
             if len(name_parts) >= 2:
                 name = f"{name_parts[0][0]}. {' '.join(name_parts[1:])} ({party_match})"
         
-        # Determine transaction type from row data
-        trans_type = "Purchase"
+        # Determine transaction type from row data - use P for Purchase, S for Sale
+        trans_type = "P"
         if "Transaction" in row and pd.notna(row.get("Transaction")):
             trans_str = str(row["Transaction"]).upper()
             if "SALE" in trans_str or "SELL" in trans_str:
-                trans_type = "Sale"
+                trans_type = "S"
         # For Congressional trades, type might be in row text
         row_text = str(row).upper()
         if "SALE" in row_text or "SELL" in row_text:
-            trans_type = "Sale"
+            trans_type = "S"
         
-        type_color = "#27ae60" if trans_type == "Purchase" else "#e74c3c"
+        type_color = "#27ae60" if trans_type == "P" else "#e74c3c"
         
         # Amount column
         value_cell = ""
@@ -2730,35 +2773,36 @@ def format_email_html(alert: InsiderAlert) -> str:
                         ('5Y', 1260, '5-year')
                     ]
                     
+                    # Use flexbox for mobile-responsive layout
+                    html += '<div style="display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;">'
                     for label, days, desc in timeframes:
                         if len(hist) > days:
                             past = hist['Close'].iloc[-days-1]
                             change = ((current - past) / past) * 100
                             color = '#27ae60' if change > 0 else '#e74c3c'
-                            html += f'<div style="margin:8px 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>{label}:</strong> <span style="color:{color}; font-weight:600;">{change:+.1f}%</span></div>'
+                            html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>{label}:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change:+.1f}%</span></div>'
+                    html += '</div>'
             except:
                 # Fallback to context data if yfinance fails
+                html += '<div style="display:flex; flex-wrap:wrap; gap:8px; margin:8px 0;">'
                 if context.get("price_change_5d") is not None:
                     change_5d = context["price_change_5d"]
                     color = '#27ae60' if change_5d > 0 else '#e74c3c'
-                    html += f'<div style="margin:8px 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>5D:</strong> <span style="color:{color}; font-weight:600;">{change_5d:+.1f}%</span></div>'
+                    html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>5D:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_5d:+.1f}%</span></div>'
                 if context.get("price_change_1m") is not None:
                     change_1m = context["price_change_1m"]
                     color = '#27ae60' if change_1m > 0 else '#e74c3c'
-                    html += f'<div style="margin:8px 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>1M:</strong> <span style="color:{color}; font-weight:600;">{change_1m:+.1f}%</span></div>'
+                    html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>1M:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_1m:+.1f}%</span></div>'
+                html += '</div>'
             
             html += '</td></tr></table>'
         
         # 52-week range as boxes below chart
         if context.get("week_52_high") and context.get("week_52_low") and context.get("current_price"):
             html += '<table style="width:100%; border-collapse:collapse; margin-top:10px;"><tr>'
-            html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>52W High</strong><br><span style="font-size:0.9em;">${context["week_52_high"]:.2f}</span></td>'
-            html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>52W Low</strong><br><span style="font-size:0.9em;">${context["week_52_low"]:.2f}</span></td>'
-            html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center; border-right:2px solid white;"><strong>Current</strong><br><span style="font-size:0.9em;">${context["current_price"]:.2f}</span></td>'
-            if context.get("distance_from_52w_low") is not None:
-                html += f'<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center;"><strong>From 52W Low</strong><br><span style="font-size:0.9em; color:#27ae60; font-weight:600;">+{context["distance_from_52w_low"]:.1f}%</span></td>'
-            else:
-                html += '<td style="background:#f5f5f5; padding:15px; width:25%; text-align:center;"><strong>From 52W Low</strong><br><span style="font-size:0.9em;">—</span></td>'
+            html += f'<td style="background:#f5f5f5; padding:15px; width:33%; text-align:center; border-right:2px solid white;"><strong>52W High</strong><br><span style="font-size:0.9em;">${context["week_52_high"]:.2f}</span></td>'
+            html += f'<td style="background:#f5f5f5; padding:15px; width:33%; text-align:center; border-right:2px solid white;"><strong>52W Low</strong><br><span style="font-size:0.9em;">${context["week_52_low"]:.2f}</span></td>'
+            html += f'<td style="background:#f5f5f5; padding:15px; width:33%; text-align:center;"><strong>Current</strong><br><span style="font-size:0.9em;">${context["current_price"]:.2f}</span></td>'
             html += '</tr></table>'
         
         # Market data
@@ -2813,14 +2857,27 @@ def format_email_html(alert: InsiderAlert) -> str:
                 if buys:
                     html += "<td style='width:50%; background:#e8f5e9; padding:20px; vertical-align:top; border-right:2px solid white;'>"
                     html += "<h3 style='margin-top:0; color:#27ae60;'>↑ Recent Buys</h3>"
-                    for trade in buys[:10]:  # Show top 10
+                    for trade in buys[:5]:  # Show max 5
                         pol = trade.get("politician", "Unknown")
+                        # Format name: First letter. Last name
+                        if pol and pol != "Unknown":
+                            parts = pol.split()
+                            if len(parts) >= 2:
+                                # Extract party if present
+                                party = ""
+                                if '(' in pol and ')' in pol:
+                                    party_part = pol.split('(')[1].split(')')[0]
+                                    party = f" ({party_part})"
+                                    pol_name = pol.split('(')[0].strip()
+                                    parts = pol_name.split()
+                                
+                                if len(parts) >= 2:
+                                    pol = f"{parts[0][0]}. {' '.join(parts[1:])}{party}"
+                        
                         size = trade.get("size", "N/A")
                         price = trade.get("price", "N/A")
                         traded_date = trade.get("traded_date", trade.get("date", "N/A"))
-                        published_date = trade.get("published_date", trade.get("date", "N/A"))
                         filed_after = trade.get("filed_after_days", "N/A")
-                        owner = trade.get("owner", "N/A")
                         
                         html += f"<div style='margin:10px 0; padding:10px; background:white; border-radius:4px; border-left:3px solid #27ae60;'>"
                         html += f"<strong style='color:#2c3e50;'>{pol}</strong><br>"
@@ -2829,14 +2886,12 @@ def format_email_html(alert: InsiderAlert) -> str:
                             html += f" @ {price}"
                         html += "</span><br>"
                         html += f"<span style='font-size:0.8em; color:#999;'>"
-                        html += f"Traded: {traded_date} | Published: {published_date}"
+                        html += f"Traded: {traded_date}"
                         if filed_after and filed_after != "N/A":
                             html += f" ({filed_after}d delay)"
-                        if owner and owner != "N/A":
-                            html += f" | Owner: {owner}"
                         html += "</span></div>"
-                    if len(buys) > 10:
-                        html += f"<p style='text-align:center; color:#999; font-style:italic; margin-top:10px;'>...and {len(buys)-10} more purchases</p>"
+                    if len(buys) > 5:
+                        html += f"<p style='text-align:center; color:#999; font-style:italic; margin-top:10px;'>...and {len(buys)-5} more purchases</p>"
                     html += "</td>"
                 else:
                     html += "<td style='width:50%; background:#e8f5e9; padding:20px; vertical-align:top; border-right:2px solid white; text-align:center; color:#999;'><em>No recent purchases</em></td>"
@@ -2844,14 +2899,27 @@ def format_email_html(alert: InsiderAlert) -> str:
                 if sells:
                     html += "<td style='width:50%; background:#ffebee; padding:20px; vertical-align:top;'>"
                     html += "<h3 style='margin-top:0; color:#e74c3c;'>↓ Recent Sells</h3>"
-                    for trade in sells[:10]:  # Show top 10
+                    for trade in sells[:5]:  # Show max 5
                         pol = trade.get("politician", "Unknown")
+                        # Format name: First letter. Last name
+                        if pol and pol != "Unknown":
+                            parts = pol.split()
+                            if len(parts) >= 2:
+                                # Extract party if present
+                                party = ""
+                                if '(' in pol and ')' in pol:
+                                    party_part = pol.split('(')[1].split(')')[0]
+                                    party = f" ({party_part})"
+                                    pol_name = pol.split('(')[0].strip()
+                                    parts = pol_name.split()
+                                
+                                if len(parts) >= 2:
+                                    pol = f"{parts[0][0]}. {' '.join(parts[1:])}{party}"
+                        
                         size = trade.get("size", "N/A")
                         price = trade.get("price", "N/A")
                         traded_date = trade.get("traded_date", trade.get("date", "N/A"))
-                        published_date = trade.get("published_date", trade.get("date", "N/A"))
                         filed_after = trade.get("filed_after_days", "N/A")
-                        owner = trade.get("owner", "N/A")
                         
                         html += f"<div style='margin:10px 0; padding:10px; background:white; border-radius:4px; border-left:3px solid #e74c3c;'>"
                         html += f"<strong style='color:#2c3e50;'>{pol}</strong><br>"
@@ -2860,14 +2928,12 @@ def format_email_html(alert: InsiderAlert) -> str:
                             html += f" @ {price}"
                         html += "</span><br>"
                         html += f"<span style='font-size:0.8em; color:#999;'>"
-                        html += f"Traded: {traded_date} | Published: {published_date}"
+                        html += f"Traded: {traded_date}"
                         if filed_after and filed_after != "N/A":
                             html += f" ({filed_after}d delay)"
-                        if owner and owner != "N/A":
-                            html += f" | Owner: {owner}"
                         html += "</span></div>"
-                    if len(sells) > 10:
-                        html += f"<p style='text-align:center; color:#999; font-style:italic; margin-top:10px;'>...and {len(sells)-10} more sales</p>"
+                    if len(sells) > 5:
+                        html += f"<p style='text-align:center; color:#999; font-style:italic; margin-top:10px;'>...and {len(sells)-5} more sales</p>"
                     html += "</td>"
                 else:
                     html += "<td style='width:50%; background:#ffebee; padding:20px; vertical-align:top; text-align:center; color:#999;'><em>No recent sales</em></td>"
@@ -2896,10 +2962,12 @@ def format_email_html(alert: InsiderAlert) -> str:
         formatted_insight = formatted_insight.replace("CATALYSTS:", "<strong>CATALYSTS:</strong><br>")
         formatted_insight = formatted_insight.replace("RISKS:", "<strong>RISKS:</strong><br>")
         formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<strong>RECOMMENDATION:</strong><br>")
-        formatted_insight = formatted_insight.replace("STRONG BUY", "<strong>STRONG BUY</strong>")
-        formatted_insight = formatted_insight.replace(" BUY ", " <strong>BUY</strong> ")
-        formatted_insight = formatted_insight.replace(" HOLD", " <strong>HOLD</strong>")
-        formatted_insight = formatted_insight.replace(" WAIT", " <strong>WAIT</strong>")
+        # Underline action keywords instead of bolding
+        formatted_insight = formatted_insight.replace("STRONG BUY", "<u>STRONG BUY</u>")
+        formatted_insight = formatted_insight.replace(" BUY ", " <u>BUY</u> ")
+        formatted_insight = formatted_insight.replace(" SELL ", " <u>SELL</u> ")
+        formatted_insight = formatted_insight.replace(" HOLD", " <u>HOLD</u>")
+        formatted_insight = formatted_insight.replace(" WAIT", " <u>WAIT</u>")
         html += f"""
             <div class="ai-insight">
                 <h2 style="margin-top:0;">🧠 AI Insight (Llama 3 - Local)</h2>
