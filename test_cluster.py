@@ -1,11 +1,11 @@
-﻿"""Test Congressional Buy signal with politician_id"""
+﻿"""Test Congressional Cluster Buy signal with politician_id"""
 import insider_alerts
 
 # Get Congressional trades and detect signals
 congressional_trades = insider_alerts.get_congressional_trades()
-alerts = insider_alerts.detect_high_conviction_congressional_buy(congressional_trades)
+alerts = insider_alerts.detect_congressional_cluster_buy(congressional_trades)
 
-print(f"Found {len(alerts)} Congressional Buy signals")
+print(f"Found {len(alerts)} Congressional Cluster Buy signals")
 
 if alerts:
     alert = alerts[0]
@@ -26,6 +26,6 @@ if alerts:
     print("\nSending Telegram...")
     insider_alerts.send_telegram_alert(alert, dry_run=False)
     
-    print("\n Test complete!")
+    print("\n Test complete! Check email and Telegram for Capitol Trades link.")
 else:
-    print("No Congressional Buy signals found")
+    print("No Congressional Cluster Buy signals found")

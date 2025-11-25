@@ -71,8 +71,41 @@ Telegram provides rich formatting, unlimited messages, and instant delivery:
    ```env
    TELEGRAM_BOT_TOKEN=your_bot_token_here
    TELEGRAM_CHAT_ID=your_chat_id_here
+   TELEGRAM_BOT_USERNAME=your_bot_username
    USE_TELEGRAM=true
    ```
+
+#### Ticker Tracking Feature
+
+Members of your Telegram group can track specific tickers and get @mentioned when insider trades occur:
+
+**How to use:**
+- Track a ticker: `@alphawhisperer_bot $AAPL`
+- Stop tracking: `@alphawhisperer_bot remove $AAPL`
+- View your list: `@alphawhisperer_bot list`
+
+When insider activity happens for tracked tickers, the bot will send the normal alert AND @mention all users tracking that ticker.
+
+**Setup:**
+1. Add the bot to your Telegram group
+2. Make sure the bot has permission to read messages
+3. Run the tracker bot: `python telegram_tracker.py`
+4. Group members can now track tickers with @mentions
+
+**Example:**
+```
+User: @alphawhisperer_bot $NVDA
+Bot: ✅ Now tracking $NVDA!
+     I'll notify you whenever there's insider trading activity for this stock.
+
+[Later when NVDA insider trade detected]
+Bot: 🚨 Cluster Buying
+     $NVDA - NVIDIA Corporation
+     
+     👤 @john_doe, @jane_smith
+     
+     [rest of alert...]
+```
 
 ### 4. Run the Script
 

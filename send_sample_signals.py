@@ -6,6 +6,7 @@ import logging
 from insider_alerts import (
     init_database,
     send_email_alert,
+    send_telegram_alert,
     get_db,
     detect_congressional_cluster_buy,
     detect_high_conviction_congressional_buy,
@@ -149,21 +150,31 @@ def send_one_of_each_signal():
     logger.info(f"  Congressional: {len([a for a in congressional_alerts if a.signal_type in signal_types])}")
     logger.info(f"  OpenInsider: {len([a for a in openinsider_alerts if a.signal_type in signal_types])}")
     
-    # Send just the first signal for testing
-    signal_type, alert = list(signal_types.items())[0]
-    source = "Congressional" if alert in congressional_alerts else "OpenInsider"
-    logger.info(f"\nSending TEST email: {signal_type} - {alert.ticker} ({source})")
-    
-    # Send email
-    success = send_email_alert(alert, dry_run=False, subject_prefix=f"TEST: ")
-    
-    if success:
-        logger.info(f"Email sent successfully")
-    else:
-        logger.error(f"Email failed to send")
+    # Send email AND Telegram for EACH signal type
+    for i, (signal_type, alert) in enumerate(signal_types.items(), 1):
+        try:
+            source = "Congressional" if alert in congressional_alerts else "OpenInsider"
+            logger.info(f"\n[{i}/{len(signal_types)}] Sending alerts: {signal_type} - {alert.ticker} ({source})")
+            
+            # Send email
+            email_success = send_email_alert(alert, dry_run=False, subject_prefix=f"TEST {i}/{len(signal_types)}: ")
+            if email_success:
+                logger.info(f"  ✓ Email sent")
+            else:
+                logger.error(f"  ✗ Email failed")
+            
+            # Send Telegram
+            telegram_success = send_telegram_alert(alert, dry_run=False)
+            if telegram_success:
+                logger.info(f"  ✓ Telegram sent")
+            else:
+                logger.error(f"  ✗ Telegram failed")
+                
+        except Exception as e:
+            logger.error(f"Error sending alerts: {e}", exc_info=True)
     
     logger.info(f"\n{'='*60}")
-    logger.info(f"Completed sending test email")
+    logger.info(f"Completed sending {len(signal_types)} test alerts (Email + Telegram)")
     logger.info(f"{'='*60}")
 
 

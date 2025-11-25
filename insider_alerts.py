@@ -22,6 +22,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
+from io import BytesIO
 
 import pandas as pd
 import requests
@@ -253,9 +254,68 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_trade_date ON openinsider_trades(trade_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_scraped_at ON openinsider_trades(scraped_at)")
         
+        # Sent alerts tracking table (prevent duplicate alerts)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sent_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                alert_id TEXT NOT NULL UNIQUE,
+                ticker TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            )
+        """)
+        
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_alert_id ON sent_alerts(alert_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_ticker ON sent_alerts(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_expires ON sent_alerts(expires_at)")
+        
         conn.commit()
     
     logger.info(f"Database initialized at {DB_FILE}")
+
+def is_alert_already_sent(alert_id: str) -> bool:
+    """Check if an alert was already sent (and not expired)."""
+    try:
+        with get_db() as conn:
+            result = conn.execute("""
+                SELECT COUNT(*) FROM sent_alerts 
+                WHERE alert_id = ? 
+                AND (expires_at IS NULL OR expires_at > datetime('now'))
+            """, (alert_id,)).fetchone()
+            return result[0] > 0
+    except Exception as e:
+        logger.error(f"Error checking sent alert: {e}")
+        return False
+
+def mark_alert_as_sent(alert_id: str, ticker: str, signal_type: str, expires_days: int = 60):
+    """Mark an alert as sent to prevent duplicates (expires in 60 days)."""
+    try:
+        with get_db() as conn:
+            expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat()
+            conn.execute("""
+                INSERT OR REPLACE INTO sent_alerts (alert_id, ticker, signal_type, sent_at, expires_at)
+                VALUES (?, ?, ?, datetime('now'), ?)
+            """, (alert_id, ticker, signal_type, expires_at))
+            conn.commit()
+            logger.info(f"Marked alert as sent: {alert_id} (expires in {expires_days} days)")
+    except Exception as e:
+        logger.error(f"Error marking alert as sent: {e}")
+
+def cleanup_expired_alerts():
+    """Remove expired alert records to keep database clean."""
+    try:
+        with get_db() as conn:
+            result = conn.execute("""
+                DELETE FROM sent_alerts 
+                WHERE expires_at IS NOT NULL AND expires_at < datetime('now')
+            """)
+            deleted = result.rowcount
+            conn.commit()
+            if deleted > 0:
+                logger.info(f"Cleaned up {deleted} expired alert records")
+    except Exception as e:
+        logger.error(f"Error cleaning up expired alerts: {e}")
 
 def get_last_scrape_time() -> Optional[datetime]:
     """Get timestamp of most recent scrape"""
@@ -284,6 +344,7 @@ def get_ticker_trades_from_db(ticker: str, limit: int = 50) -> List[Dict]:
             for row in rows:
                 trades.append({
                     'politician': row['politician_name'],
+                    'politician_id': row['politician_id'],
                     'party': row['party'],
                     'chamber': row['chamber'],
                     'state': row['state'],
@@ -565,6 +626,7 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
     new_trades_count = 0
     duplicate_count = 0
     total_pages = 0
+    consecutive_duplicate_pages = 0  # Track pages with all duplicates
     
     try:
         from selenium import webdriver
@@ -816,6 +878,15 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     continue
             
             logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates")
+            
+            # Track consecutive pages with all duplicates (early stopping optimization)
+            if page_trades == 0 and page_dupes > 0:
+                consecutive_duplicate_pages += 1
+                if consecutive_duplicate_pages >= 5:
+                    logger.info(f"Found 5 consecutive pages with all duplicates - assuming rest is already in DB")
+                    break
+            else:
+                consecutive_duplicate_pages = 0  # Reset counter if we found new trades
             
             # Stop early if we got zero trades on this page (means we're past the data)
             if page_trades == 0 and page_dupes == 0:
@@ -1166,6 +1237,22 @@ MARKET DATA:"""
                 prompt += " (BIPARTISAN - both parties!)"
         if "investor" in alert.details:
             prompt += f"\n• Strategic buyer: {alert.details['investor']}"
+        
+        # Add ownership change information (capital delta) if available
+        if len(alert.trades) > 0:
+            # Check if Delta Own column exists (shows increase in capital/ownership %)
+            if "Delta Own" in alert.trades.columns:
+                delta_values = []
+                for _, row in alert.trades.iterrows():
+                    if pd.notna(row.get("Delta Own")):
+                        delta_own = row["Delta Own"]
+                        if isinstance(delta_own, str) and delta_own.strip():
+                            delta_values.append(delta_own)
+                        elif isinstance(delta_own, (int, float)):
+                            delta_values.append(f"+{delta_own:.1f}%")
+                
+                if delta_values:
+                    prompt += f"\n• Ownership Increase: {', '.join(delta_values[:3])} (shows strong conviction)"
         
         # Add recent news headlines for context
         if context.get("news") and len(context["news"]) > 0:
@@ -2133,7 +2220,7 @@ def detect_bearish_cluster_selling(df: pd.DataFrame) -> List[InsiderAlert]:
 
 def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
-    Detect Strategic Investor Buy: When a corporation (not an individual) buys stock.
+    Detect Corporation Purchase: When a corporation (not an individual) buys stock.
     Examples: NVIDIA buying SERV, Amazon buying RIVN, etc.
     
     This is highly bullish as it signals:
@@ -2175,7 +2262,7 @@ def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
             company_name = row.get("Company Name", row["Ticker"])
             
             alert = InsiderAlert(
-                signal_type="Strategic Investor Buy",
+                signal_type="Corporation Purchase",
                 ticker=row["Ticker"],
                 company_name=company_name,
                 trades=pd.DataFrame([row]),
@@ -2189,7 +2276,7 @@ def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
             )
             alerts.append(alert)
     
-    logger.info(f"Detected {len(alerts)} strategic investor buy signals")
+    logger.info(f"Detected {len(alerts)} corporation purchase signals")
     return alerts
 
 
@@ -2308,6 +2395,7 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
                 trades_data.append({
                     "Ticker": ticker,
                     "Insider Name": trade.get('politician', 'Unknown'),
+                    "Politician ID": trade.get('politician_id', ''),
                     "Traded Date": trade_date,
                     "Published Date": published_date,
                     "Filed After": trade.get('filed_after', 'N/A'),
@@ -2466,6 +2554,7 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
             trades_data = {
                 "Ticker": ticker,
                 "Insider Name": politician,
+                "Politician ID": trade.get('politician_id', ''),
                 "Traded Date": trade_date,
                 "Published Date": published_date,
                 "Filed After": trade.get('filed_after', 'N/A'),
@@ -2477,7 +2566,7 @@ def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -
             trades_df = pd.DataFrame([trades_data])
             
             alert = InsiderAlert(
-                signal_type="High-Conviction Congressional Buy",
+                signal_type="Congressional Buy",
                 ticker=ticker,
                 company_name=ticker,  # Will be fetched later in email formatting
                 trades=trades_df,
@@ -2709,7 +2798,7 @@ def format_email_html(alert: InsiderAlert) -> str:
     <body>
         <div class="container">
             <div class="header">
-                <div style="font-size: 1.5em;">🚨 {alert.signal_type} 🚨</div>
+                <div style="font-size: 1.5em;">🚨 {alert.signal_type.upper()} 🚨</div>
                 <div style="margin-top:10px;">
                     <span class="ticker" style="font-size:2em;">{alert.company_name if alert.company_name != alert.ticker else alert.ticker}</span>
                     <span class="ticker" style="font-size:2em; margin-left:10px;">{f'(${alert.ticker})' if alert.company_name != alert.ticker else ''}</span>
@@ -2719,20 +2808,8 @@ def format_email_html(alert: InsiderAlert) -> str:
     
     # Signal-specific details
     if "investor" in alert.details:
-        # Strategic investor
-        html += f"""
-            <div class="signal-box">
-                <div class="signal-item"><strong>🏢 Corporate Investor:</strong> {alert.details['investor']}</div>
-                <div class="signal-item"><strong>💰 Value:</strong> ${alert.details['value']:,.0f}</div>
-        """
-        if "trade_date" in alert.details:
-            html += f"""<div class="signal-item"><strong>📅 Date:</strong> {alert.details['trade_date'].strftime('%Y-%m-%d')}</div>"""
-        html += """
-                <div class="signal-item" style="margin-top:10px;">
-                    <strong>💡 Why this matters:</strong> Corporate investors signal strategic partnerships or acquisition interest. They conduct deep due diligence before investing.
-                </div>
-            </div>
-        """
+        # Strategic investor - skip the info section
+        pass
         
     elif "politician" in alert.details:
         # High-conviction Congressional trade - only show if known trader
@@ -3151,7 +3228,16 @@ def format_email_html(alert: InsiderAlert) -> str:
     # Footer with link - use Capitol Trades for Congressional signals
     is_congressional = "Congressional" in alert.signal_type
     if is_congressional:
-        link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}"
+        # Get politician_id from first trade if available
+        politician_id = ""
+        if not alert.trades.empty and "Politician ID" in alert.trades.columns:
+            politician_id = str(alert.trades.iloc[0]["Politician ID"]).strip()
+        
+        if politician_id and politician_id != "nan" and politician_id != "":
+            link_url = f"https://www.capitoltrades.com/trades?politician={politician_id}"
+        else:
+            # Fallback to ticker-based link
+            link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}"
         link_text = "View on Capitol Trades →"
     else:
         link_url = f"http://openinsider.com/search?q={alert.ticker}"
@@ -3180,6 +3266,50 @@ def format_email_html(alert: InsiderAlert) -> str:
     return html
 
 
+def get_users_tracking_ticker(ticker: str) -> List[Dict[str, str]]:
+    """
+    Get all users tracking a specific ticker.
+    
+    Args:
+        ticker: Stock ticker symbol
+        
+    Returns:
+        List of dicts with user info: {user_id, username, first_name}
+    """
+    try:
+        from pathlib import Path
+        db_file = Path("data") / "ticker_tracking.db"
+        
+        if not db_file.exists():
+            return []
+        
+        ticker = ticker.upper().strip()
+        
+        conn = sqlite3.connect(db_file)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT user_id, username, first_name
+            FROM user_tickers
+            WHERE ticker = ?
+        """, (ticker,))
+        
+        users = []
+        for row in cursor.fetchall():
+            users.append({
+                'user_id': row[0],
+                'username': row[1],
+                'first_name': row[2]
+            })
+        
+        conn.close()
+        return users
+        
+    except Exception as e:
+        logger.warning(f"Could not check ticker tracking: {e}")
+        return []
+
+
 def format_telegram_message(alert: InsiderAlert) -> str:
     """Format alert as Telegram message with markdown."""
     # Escape special characters for Telegram MarkdownV2
@@ -3201,20 +3331,46 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         else:
             return f"${value:.0f}"
     
-    msg = f"🚨 *{escape_md(alert.signal_type)}*\n\n"
+    # Check if any users are tracking this ticker
+    tracked_users = get_users_tracking_ticker(alert.ticker)
+    
+    msg = f"🚨 *{escape_md(alert.signal_type.upper())}* 🚨\n\n"
     company_esc = escape_md(alert.company_name)
     ticker_esc = escape_md(alert.ticker)
     msg += f"*{ticker_esc}* \\- {company_esc}\n\n"
     
+    # Mention users who are tracking this ticker
+    if tracked_users:
+        mentions = []
+        for user in tracked_users:
+            if user['username']:
+                mentions.append(f"@{user['username']}")
+            else:
+                # Use first name if no username
+                mentions.append(escape_md(user['first_name']))
+        
+        if mentions:
+            msg += f"👤 {', '.join(mentions)}\n\n"
+    
     # Top trades (max 5 for brevity)
-    msg += f"\n📊 *Trades:*\n"
+    msg += f"📊 *Trades:*\n"
     for idx, (_, row) in enumerate(alert.trades.head(5).iterrows()):
         # Trade Date format: "15Nov" (day + 3-letter month)
-        if pd.notna(row.get("Trade Date")):
-            trade_date = row["Trade Date"]
-            date = f"{trade_date.day}{trade_date.strftime('%b')}"
+        # For Congressional trades, use "Traded Date" column
+        trade_date = row.get("Traded Date") if pd.notna(row.get("Traded Date")) else row.get("Trade Date")
+        if pd.notna(trade_date):
+            if isinstance(trade_date, str):
+                # Parse string date if needed
+                try:
+                    from dateutil import parser
+                    trade_date = parser.parse(trade_date)
+                    date = f"{trade_date.day}{trade_date.strftime('%b')}"
+                except:
+                    date = trade_date[:5] if len(trade_date) >= 5 else trade_date
+            else:
+                date = f"{trade_date.day}{trade_date.strftime('%b')}"
         else:
-            date = "?"
+            date = "N/A"
         
         # Format insider name - for Congressional trades, shorten to "Initial. LastName (Party)"
         insider_name = row['Insider Name']
@@ -3225,18 +3381,31 @@ def format_telegram_message(alert: InsiderAlert) -> str:
             name_part = insider_name.split('(')[0].strip()
             name_parts = name_part.split()
             if len(name_parts) >= 2:
-                # Format as "J. Gottheimer (D)"
-                formatted_name = f"{name_parts[0][0]}. {' '.join(name_parts[1:])} ({party_match})"
+                # Format as "J. LastName (D)" - First initial + Last name
+                formatted_name = f"{name_parts[0][0]}. {name_parts[-1]} ({party_match})"
             else:
                 formatted_name = f"{name_part} ({party_match})"
             insider = escape_md(formatted_name[:30])
         else:
-            insider = escape_md(insider_name[:25])
+            # Corporate insider - format based on signal type
+            if alert.signal_type == "Corporation Purchase":
+                # Keep full name for Corporation Purchase signal
+                insider = escape_md(insider_name[:50])
+            else:
+                # For other signals, format as Initial + Last Name
+                name_parts = insider_name.split()
+                if len(name_parts) >= 2:
+                    formatted_name = f"{name_parts[0][0]}. {name_parts[-1]}"
+                    insider = escape_md(formatted_name[:25])
+                else:
+                    insider = escape_md(insider_name[:25])
         
         date_esc = escape_md(date)
         
-        # Build trade line
-        trade_line = f"• {date_esc}: {insider}"
+        # Build trade line with underlined date and line break
+        trade_line = f"__"
+        trade_line += date_esc
+        trade_line += f"__\n{insider}"
         
         # For Congressional trades, show size range and price
         if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
@@ -3250,6 +3419,10 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         elif pd.notna(row['Value']) and row['Value'] > 0:
             value_esc = escape_md(format_value(row['Value']))
             trade_line += f" \\- {value_esc}"
+            # Add price if available for corporate trades
+            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
+                price_val = escape_md(str(row["Price"]))
+                trade_line += f" @ {price_val}"
         
         # Add ownership change % if available and not empty (corporate insiders only)
         if "Delta Own" in row and pd.notna(row["Delta Own"]):
@@ -3293,9 +3466,22 @@ def format_telegram_message(alert: InsiderAlert) -> str:
     except Exception as e:
         logger.warning(f"Could not add context to message: {e}")
     
-    # Provide plain HTTP link (Telegram blocks clickable HTTP, but users can copy/paste)
-    ticker_url = f"http://openinsider.com/search?q={alert.ticker}"
-    msg += f"\n🔗 View on OpenInsider:\n`{ticker_url}`"
+    # Provide link - HTTPS links are clickable in Telegram
+    # Check if this is a Congressional signal
+    if "Congressional" in alert.signal_type:
+        # Get politician_id from first trade if available
+        politician_id = ""
+        if not alert.trades.empty and "Politician ID" in alert.trades.columns:
+            politician_id = str(alert.trades.iloc[0]["Politician ID"]).strip()
+        
+        if politician_id and politician_id != "nan" and politician_id != "":
+            msg += f"\n🔗 [View on Capitol Trades](https://www.capitoltrades.com/trades?politician={politician_id})"
+        else:
+            # Fallback to ticker-based link
+            msg += f"\n🔗 [View on Capitol Trades](https://www.capitoltrades.com/trades?ticker={alert.ticker})"
+    else:
+        ticker_url = f"http://openinsider.com/search?q={alert.ticker}"
+        msg += f"\n🔗 View on OpenInsider:\n`{ticker_url}`"
     return msg
 
 
@@ -3336,10 +3522,8 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         text += "⭐ Known Trader: Proven track record\n"
         
     elif "investor" in alert.details:
-        text += f"\nCorporate Investor: {alert.details['investor']}\n"
-        text += f"Value: ${alert.details['value']:,.0f}\n"
-        if "trade_date" in alert.details:
-            text += f"Date: {alert.details['trade_date'].strftime('%Y-%m-%d')}\n"
+        # Skip Corporate Investor info section for text email too
+        pass
             
     elif "value" in alert.details:
         if "insider" in alert.details:
@@ -3410,8 +3594,52 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     return text
 
 
+def generate_stock_chart(ticker: str, days: int = 180) -> BytesIO:
+    """
+    Fetch stock price chart from Finviz (same as used in emails).
+    
+    Args:
+        ticker: Stock ticker symbol
+        days: Number of days of historical data (not used, Finviz has fixed timeframes)
+        
+    Returns:
+        BytesIO buffer containing PNG image
+    """
+    try:
+        # Fetch chart from Finviz (same source as email charts)
+        chart_url = f"https://finviz.com/chart.ashx?t={ticker}&ty=c&ta=1&p=d&s=l"
+        
+        # Add browser headers to avoid 403 errors
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://finviz.com/',
+        }
+        
+        response = requests.get(chart_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            buf = BytesIO(response.content)
+            buf.seek(0)
+            return buf
+        else:
+            logger.warning(f"Failed to fetch Finviz chart for {ticker}: HTTP {response.status_code}")
+            return None
+        
+    except Exception as e:
+        logger.warning(f"Failed to fetch chart for {ticker}: {e}")
+        return None
+
+
 def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
     """Send Telegram alert via Bot API to one or more accounts."""
+    # Check if alert already sent
+    if is_alert_already_sent(alert.alert_id):
+        logger.info(f"Skipping duplicate Telegram alert: {alert.ticker} - {alert.signal_type} (already sent)")
+        return False
+    
     if not USE_TELEGRAM:
         return False
     
@@ -3430,6 +3658,9 @@ def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
         # Format message
         message_text = format_telegram_message(alert)
         
+        # Generate chart image
+        chart_buf = generate_stock_chart(alert.ticker, days=180)
+        
         # Send via Telegram Bot API (async)
         async def send_message():
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
@@ -3437,12 +3668,26 @@ def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
             
             for chat_id in chat_ids:
                 try:
+                    # Send text message
                     await bot.send_message(
                         chat_id=chat_id,
                         text=message_text,
                         parse_mode=ParseMode.MARKDOWN_V2,
                         disable_web_page_preview=True
                     )
+                    
+                    # Send chart if available
+                    if chart_buf:
+                        chart_buf.seek(0)  # Reset buffer position before each send
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=chart_buf,
+                            caption=f'{alert.ticker} - Chart'
+                        )
+                        logger.info(f"Chart sent to {chat_id}")
+                    else:
+                        logger.warning(f"No chart available for {alert.ticker}")
+                    
                     success_count += 1
                 except Exception as e:
                     logger.error(f"Failed to send to chat_id {chat_id}: {e}")
@@ -3476,6 +3721,11 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
     Returns:
         True if email sent successfully
     """
+    # Check if alert already sent
+    if is_alert_already_sent(alert.alert_id):
+        logger.info(f"Skipping duplicate alert: {alert.ticker} - {alert.signal_type} (already sent)")
+        return False
+    
     subject = f"[Insider Alert] {subject_prefix}{alert.ticker} — {alert.signal_type}"
     
     # Format email body
@@ -3507,6 +3757,10 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
             server.send_message(msg)
         
         logger.info(f"Email sent successfully: {subject}")
+        
+        # Mark as sent to prevent duplicates
+        mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)
+        
         return True
         
     except Exception as e:
@@ -3568,6 +3822,10 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
     logger.info("=" * 60)
     logger.info("Starting insider trading alert check")
     logger.info("=" * 60)
+    
+    # Initialize database and cleanup old alerts
+    init_database()
+    cleanup_expired_alerts()
     
     try:
         # Fetch data
