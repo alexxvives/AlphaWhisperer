@@ -628,6 +628,11 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
     total_pages = 0
     consecutive_duplicate_pages = 0  # Track pages with all duplicates
     
+    # Calculate cutoff date for 30-day window
+    from datetime import datetime, timedelta
+    cutoff_date = datetime.now() - timedelta(days=30)
+    logger.info(f"Filtering Congressional trades published after: {cutoff_date.strftime('%Y-%m-%d')}")
+    
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
@@ -846,6 +851,21 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                                     price_numeric = float(price_match.group(1).replace(',', ''))
                                 except:
                                     pass
+                    
+                    # Skip trades outside 30-day window (based on published_date)
+                    if published_date:
+                        try:
+                            pub_date_obj = datetime.strptime(published_date, "%Y-%m-%d")
+                            if pub_date_obj < cutoff_date:
+                                logger.debug(f"Skipping trade published before cutoff: {published_date}")
+                                continue
+                        except:
+                            pass
+                    
+                    # Skip trades filed more than 30 days after transaction
+                    if filed_after_days and filed_after_days > 30:
+                        logger.debug(f"Skipping trade filed {filed_after_days} days late (>30 day threshold)")
+                        continue
                     
                     # Build trade dict
                     trade = {
@@ -1879,11 +1899,13 @@ def parse_openinsider(html: str) -> pd.DataFrame:
         html: HTML content from OpenInsider
         
     Returns:
-        Normalized DataFrame of trades
+        Normalized DataFrame of trades (filtered to last 30 days)
         
     Raises:
         ValueError: If parsing fails with all methods
     """
+    from datetime import datetime, timedelta
+    
     # Try pandas first (faster and more reliable)
     df = parse_openinsider_pandas(html)
     
@@ -1896,6 +1918,16 @@ def parse_openinsider(html: str) -> pd.DataFrame:
     
     # Normalize the data
     df = normalize_dataframe(df)
+    
+    # Filter to last 30 days based on Trade Date
+    cutoff_date = datetime.now() - timedelta(days=30)
+    if 'Trade Date' in df.columns:
+        before_count = len(df)
+        df = df[df['Trade Date'] >= cutoff_date].copy()
+        after_count = len(df)
+        filtered_count = before_count - after_count
+        if filtered_count > 0:
+            logger.info(f"Filtered out {filtered_count} OpenInsider trades older than 30 days")
     
     return df
 
@@ -2623,7 +2655,8 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     all_alerts.extend(detect_cluster_buying(df))
     all_alerts.extend(detect_ceo_cfo_buy(df))
     all_alerts.extend(detect_large_single_buy(df))
-    all_alerts.extend(detect_first_buy_12m(df))
+    # REMOVED: First Buy in 12 Months signal (less reliable)
+    # all_alerts.extend(detect_first_buy_12m(df))
     all_alerts.extend(detect_bearish_cluster_selling(df))
     all_alerts.extend(detect_strategic_investor_buy(df))
     
@@ -2855,6 +2888,7 @@ def format_email_html(alert: InsiderAlert) -> str:
                 <th>Type</th>
                 <th>Price</th>
                 <th>Amount</th>
+                <th>Delta %</th>
             </tr>
     """
     
@@ -2978,6 +3012,14 @@ def format_email_html(alert: InsiderAlert) -> str:
         elif pd.notna(row.get('Value')) and row['Value'] > 0:
             value_cell = f"${row['Value']:,.0f}"
         
+        # Delta % column (ownership change)
+        delta_cell = "—"
+        if "Delta Own" in row and pd.notna(row.get("Delta Own")):
+            delta_val = str(row["Delta Own"]).strip()
+            if delta_val and delta_val != "—" and delta_val != "":
+                # Delta Own might be "New" or a percentage like "+15%"
+                delta_cell = delta_val
+        
         html += f"""
             <tr>
                 <td>{traded_date}</td>
@@ -2988,6 +3030,7 @@ def format_email_html(alert: InsiderAlert) -> str:
                 <td style="color:{type_color}; font-weight:500;">{trans_type}</td>
                 <td>{price_cell}</td>
                 <td>{value_cell}</td>
+                <td>{delta_cell}</td>
             </tr>
         """
     
@@ -3816,11 +3859,13 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
     
     # Send alerts for new signals
     for alert in new_alerts:
-        # Try Telegram first if enabled
-        if USE_TELEGRAM:
-            telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
-            if telegram_sent:
-                logger.info(f"Alert sent via Telegram: {alert.ticker}")
+        # COMMENTED OUT: Telegram sending disabled for testing - alerts logged instead
+        # if USE_TELEGRAM:
+        #     telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
+        #     if telegram_sent:
+        #         logger.info(f"Alert sent via Telegram: {alert.ticker}")
+        
+        logger.info(f"[TESTING] Would send Telegram alert: {alert.ticker} - {alert.signal_type}")
         
         # Always send email as backup or primary
         send_email_alert(alert, dry_run=dry_run)
