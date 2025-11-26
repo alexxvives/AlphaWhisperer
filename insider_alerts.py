@@ -1328,8 +1328,8 @@ What sector-specific or technical factors could drive this? Be specific to the m
 **RISKS** (2 sentences):
 What could go wrong? Consider valuation, sector headwinds, technical weakness.
 
-**RECOMMENDATION** (75 words maximum):
-Provide a clear, actionable recommendation with complete sentences. Use STRONG BUY only if metrics are exceptional. Use BUY if solid but not perfect. Use HOLD if mixed signals. Use WAIT if overvalued or weak momentum. Keep response under 75 words but ensure all sentences are complete.
+**RECOMMENDATION** (100 words maximum):
+Provide a clear, actionable recommendation with detailed reasoning. Explain WHY you're giving this recommendation based on the specific data points. If it's a BUY, explain what makes it attractive. If it's HOLD or WAIT, explain what concerns exist. Be specific - reference the actual numbers (P/E, short interest, price action, etc.). Use STRONG BUY only if metrics are exceptional. Use BUY if solid but not perfect. Use HOLD if mixed signals. Use WAIT if overvalued or weak momentum. Keep response under 100 words but ensure all sentences are complete and provide reasoning.
 
 CRITICAL RULES:
 - Insider buying is just ONE signal - don't automatically recommend STRONG BUY
@@ -1337,8 +1337,9 @@ CRITICAL RULES:
 - Negative price momentum should be acknowledged  
 - Be skeptical and balanced - this is real money
 - If Congressional alignment shows proven traders, emphasize this as a strong signal
+- ALWAYS explain WHY you're giving the recommendation - cite specific metrics
 - Base analysis ONLY on data provided above
-- MAXIMUM 75 WORDS - be concise but complete all sentences
+- MAXIMUM 100 WORDS - be thorough but concise, complete all sentences
 
 Format your response with bold section headers and clear paragraph breaks. DO NOT use markdown ** for bold - just write naturally with good structure."""
         
@@ -3383,6 +3384,8 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         """Format dollar values with K/M suffixes."""
         if value >= 1_000_000:
             return f"${value/1_000_000:.1f}M"
+        elif value >= 999_500:  # Round up to 1M if >= 999.5K
+            return f"${value/1_000_000:.1f}M"
         elif value >= 1_000:
             return f"${value/1_000:.0f}K"
         else:
@@ -4001,6 +4004,10 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
     for alert in all_detected_alerts:
         signal_type = alert.signal_type
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
+    
+    # Add tracked ticker count separately
+    if tracked_alerts:
+        signal_counts['Tracked Tickers'] = len(tracked_alerts)
     
     # Send intro message to Telegram if there are signals to send
     if USE_TELEGRAM and (tracked_alerts or regular_alerts) and not dry_run:
