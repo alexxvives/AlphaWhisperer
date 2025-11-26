@@ -911,7 +911,20 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     # Use JavaScript click to avoid cookie banner interception
                     driver.execute_script("arguments[0].click();", next_link)
                     logger.info("Navigating to next page...")
-                    time.sleep(3)
+                    
+                    # Wait for page to actually load (wait for table to be stale and reload)
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.staleness_of(driver.find_element(By.TAG_NAME, "table"))
+                        )
+                        # Wait for new table to appear
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.TAG_NAME, "table"))
+                        )
+                        time.sleep(2)
+                    except Exception as e:
+                        logger.warning(f"Timeout waiting for next page to load: {e}")
+                        break
                 else:
                     logger.info("No more pages to scrape")
                     break
