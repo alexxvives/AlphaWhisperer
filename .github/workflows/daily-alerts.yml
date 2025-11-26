@@ -55,13 +55,13 @@ jobs:
 
       - name: Run daily alerts
         env:
-          # Email configuration
+          # Email configuration (code expects SMTP_* names)
           SMTP_HOST: smtp.gmail.com
           SMTP_PORT: 587
           SMTP_USER: ${{ secrets.EMAIL_USER }}
           SMTP_PASS: ${{ secrets.EMAIL_PASSWORD }}
           ALERT_TO: ${{ secrets.EMAIL_RECIPIENTS }}
-          # Telegram configuration
+          # Telegram configuration (code expects TELEGRAM_CHAT_ID singular)
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_IDS }}
           USE_TELEGRAM: true
