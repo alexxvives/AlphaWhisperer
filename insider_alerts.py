@@ -3363,20 +3363,14 @@ def get_users_tracking_ticker(ticker: str) -> List[Dict[str, str]]:
         List of dicts with user info: {user_id, username, first_name}
     """
     try:
-        from pathlib import Path
-        db_file = Path("data") / "ticker_tracking.db"
-        
-        if not db_file.exists():
-            return []
-        
         ticker = ticker.upper().strip()
         
-        conn = sqlite3.connect(db_file)
+        conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         
         cursor.execute("""
             SELECT user_id, username, first_name
-            FROM user_tickers
+            FROM tracked_tickers
             WHERE ticker = ?
         """, (ticker,))
         
@@ -3877,8 +3871,42 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
     
     logger.info(f"Found {len(new_alerts)} new alerts (out of {len(alerts)} total)")
     
-    # Send alerts for new signals
+    # Separate tracked ticker alerts from regular signals
+    tracked_alerts = []
+    regular_alerts = []
+    
     for alert in new_alerts:
+        # Check if this ticker is being tracked by any user
+        tracking_users = get_users_tracking_ticker(alert.ticker)
+        if tracking_users:
+            tracked_alerts.append((alert, tracking_users))
+        else:
+            regular_alerts.append(alert)
+    
+    # Cap regular signals at 3 (top signals by priority)
+    MAX_REGULAR_SIGNALS = 3
+    if len(regular_alerts) > MAX_REGULAR_SIGNALS:
+        logger.info(f"Capping regular signals from {len(regular_alerts)} to {MAX_REGULAR_SIGNALS}")
+        # Prioritize: Congressional > C-Suite > Cluster > Large Single > Others
+        priority_order = {
+            'High-Conviction Congressional Buy': 1,
+            'Congressional Cluster Buy': 2,
+            'C-Suite Buy': 3,
+            'Cluster Buying': 4,
+            'Large Single Buy': 5,
+            'Strategic Investor Buy': 6
+        }
+        regular_alerts.sort(key=lambda a: priority_order.get(a.signal_type, 99))
+        regular_alerts = regular_alerts[:MAX_REGULAR_SIGNALS]
+    
+    # Send tracked ticker alerts (all of them, no cap)
+    for alert, users in tracked_alerts:
+        logger.info(f"[TRACKED TICKER] {alert.ticker} - tracked by {len(users)} user(s)")
+        logger.info(f"[TESTING] Would send Telegram alert: {alert.ticker} - {alert.signal_type}")
+        send_email_alert(alert, dry_run=dry_run)
+    
+    # Send regular signals (capped at 3)
+    for alert in regular_alerts:
         # COMMENTED OUT: Telegram sending disabled for testing - alerts logged instead
         # if USE_TELEGRAM:
         #     telegram_sent = send_telegram_alert(alert, dry_run=dry_run)

@@ -40,7 +40,7 @@ TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "alphawhisperer_bot")
 # Database configuration
 DB_DIR = Path("data")
 DB_DIR.mkdir(exist_ok=True)
-DB_FILE = DB_DIR / "ticker_tracking.db"
+DB_FILE = DB_DIR / "alphaWhisperer.db"
 
 
 def init_tracking_db():

@@ -37,7 +37,7 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 # Database configuration
 DB_DIR = Path("data")
 DB_DIR.mkdir(exist_ok=True)
-DB_FILE = DB_DIR / "congressional_trades.db"
+DB_FILE = DB_DIR / "alphaWhisperer.db"
 
 
 def init_tracking_db():

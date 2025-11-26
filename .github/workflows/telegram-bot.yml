@@ -44,12 +44,12 @@ jobs:
         run: |
           python telegram_tracker_polling.py
 
-      - name: Upload database artifact for next run
+      - name: Upload database artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: database
-          path: data/congressional_trades.db
+          path: data/alphaWhisperer.db
           retention-days: 90
           overwrite: true
 
