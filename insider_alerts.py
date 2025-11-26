@@ -54,15 +54,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# State management
-STATE_DIR = Path("state")
-STATE_DIR.mkdir(exist_ok=True)
-STATE_FILE = STATE_DIR / "seen_alerts.json"
-
 # Database for Congressional trades
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
-DB_FILE = DATA_DIR / "congressional_trades.db"
+DB_FILE = DATA_DIR / "alphaWhisperer.db"
 
 # Configuration from environment
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -2696,25 +2691,7 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     return all_alerts
 
 
-def load_seen_alerts() -> Set[str]:
-    """Load set of previously seen alert IDs."""
-    if STATE_FILE.exists():
-        try:
-            with open(STATE_FILE, "r") as f:
-                data = json.load(f)
-                return set(data.get("seen_alerts", []))
-        except Exception as e:
-            logger.warning(f"Could not load state file: {e}")
-    return set()
-
-
-def save_seen_alerts(seen: Set[str]):
-    """Save set of seen alert IDs."""
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump({"seen_alerts": list(seen)}, f, indent=2)
-    except Exception as e:
-        logger.error(f"Could not save state file: {e}")
+# State file functions removed - using database-only deduplication
 
 
 def format_email_html(alert: InsiderAlert) -> str:
@@ -3416,9 +3393,13 @@ def format_telegram_message(alert: InsiderAlert) -> str:
     tracked_users = get_users_tracking_ticker(alert.ticker)
     
     msg = f"🚨 *{escape_md(alert.signal_type.upper())}* 🚨\n\n"
+    # Format as "Company Name ($TICKER)" instead of "TICKER - Company Name"
     company_esc = escape_md(alert.company_name)
     ticker_esc = escape_md(alert.ticker)
-    msg += f"*{ticker_esc}* \\- {company_esc}\n\n"
+    if alert.company_name != alert.ticker:
+        msg += f"*{company_esc} \\(${ticker_esc}\\)*\n\n"
+    else:
+        msg += f"*${ticker_esc}*\n\n"
     
     # Mention users who are tracking this ticker
     if tracked_users:
@@ -3474,11 +3455,18 @@ def format_telegram_message(alert: InsiderAlert) -> str:
                 insider = escape_md(insider_name[:50])
             else:
                 # For other signals, format as Initial + Last Name
+                # Only abbreviate if name has exactly 2 parts (FirstName LastName)
                 name_parts = insider_name.split()
-                if len(name_parts) >= 2:
-                    formatted_name = f"{name_parts[0][0]}. {name_parts[-1]}"
+                if len(name_parts) == 2:
+                    # Two-part name: abbreviate first name
+                    formatted_name = f"{name_parts[0][0]}. {name_parts[1]}"
+                    insider = escape_md(formatted_name[:25])
+                elif len(name_parts) > 2:
+                    # Three or more parts (e.g., Robertson Peter J): keep first + last, drop middle
+                    formatted_name = f"{name_parts[0]} {name_parts[-1]}"
                     insider = escape_md(formatted_name[:25])
                 else:
+                    # Single name or empty
                     insider = escape_md(insider_name[:25])
         
         date_esc = escape_md(date)
@@ -3714,6 +3702,96 @@ def generate_stock_chart(ticker: str, days: int = 180) -> BytesIO:
         return None
 
 
+def send_telegram_intro(signal_counts: dict, dry_run: bool = False) -> bool:
+    """Send intro message before sending individual alerts."""
+    if not USE_TELEGRAM or dry_run:
+        return False
+    
+    import random
+    
+    intros = [
+        "AlphaWhisperer reporting in… crunching numbers and organizing signals into something that looks civilized. Here's the rundown:",
+        "AlphaWhisperer online… signals sorted, noise filtered, sanity preserved. Here's what surfaced:",
+        "AlphaWhisperer checking in… scanning patterns and translating chaos into English. Here's the latest:",
+        "AlphaWhisperer activated… data reviewed, signals detected, confidence adjusted accordingly. Here's your update:",
+        "AlphaWhisperer speaking… algorithms agree this is worth your attention. Here's the batch:",
+        "AlphaWhisperer booted… charts inspected, signals wrangled, conclusions packaged. Here's what I've got:",
+        "AlphaWhisperer online… combing through the noise so you don't have to. Here's the breakdown:",
+        "AlphaWhisperer checking logs… patterns confirmed, surprises noted, results incoming:",
+        "AlphaWhisperer ready… sorting real signals from market drama. Here's the update:",
+        "AlphaWhisperer transmitting… data aligned, indicators behaving, insights prepared. Here's what I found:",
+        "AlphaWhisperer engaged… noise filtered out, signals locked in. Here's the summary:",
+        "AlphaWhisperer reporting… analytics completed, signal cluster identified. Here's the output:",
+        "AlphaWhisperer back online… market murmurs analyzed and neatly packaged. Here's the latest batch:",
+        "AlphaWhisperer status: operational… signals classified and ready for review. Here's your feed:",
+        "AlphaWhisperer scanning complete… nothing exploded, which is a win. Here are the signals:",
+        "AlphaWhisperer initiating report… pattern recognition says these are worth a look. Here's the data:",
+        "AlphaWhisperer delivering… calculations done, anomalies labeled, insights queued. Here's what turned up:",
+        "AlphaWhisperer prepared… sifted the noise, kept the good stuff. Here's the report:",
+        "AlphaWhisperer transmitting analysis… the market whispered, I listened. Here's what came through:",
+        "AlphaWhisperer ready to brief… signals detected, logs parsed, summary loaded. Here you go:"
+    ]
+    
+    try:
+        import asyncio
+        from telegram import Bot
+        from telegram.constants import ParseMode
+        
+        # Support multiple chat IDs
+        chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(",")]
+        
+        # Build intro message
+        intro_text = random.choice(intros)
+        intro_text += "\n\n"
+        
+        # Add signal counts
+        for signal_type, count in signal_counts.items():
+            if count > 0:
+                intro_text += f"• {signal_type}: {count}\n"
+        
+        # Escape markdown special characters
+        def escape_md(text):
+            chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+            for char in chars_to_escape:
+                text = text.replace(char, f'\\{char}')
+            return text
+        
+        intro_text = escape_md(intro_text)
+        
+        # Send via Telegram Bot API
+        async def send_intro():
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            success_count = 0
+            
+            for chat_id in chat_ids:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=intro_text,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        disable_web_page_preview=True
+                    )
+                    success_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to send intro to chat_id {chat_id}: {e}")
+            
+            return success_count
+        
+        # Run async function
+        success_count = asyncio.run(send_intro())
+        
+        if success_count > 0:
+            logger.info(f"Telegram intro sent successfully to {success_count}/{len(chat_ids)} accounts")
+            return True
+        else:
+            logger.error("Failed to send Telegram intro to any account")
+            return False
+    
+    except Exception as e:
+        logger.error(f"Failed to send Telegram intro: {e}")
+        return False
+
+
 def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
     """Send Telegram alert via Bot API to one or more accounts."""
     # Check if alert already sent
@@ -3861,14 +3939,11 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
         logger.info("No alerts to process")
         return
     
-    # Load seen alerts
-    seen_alerts = load_seen_alerts()
-    
+    # Filter to only new alerts (check database for deduplication)
     new_alerts = []
     for alert in alerts:
-        if alert.alert_id not in seen_alerts:
+        if not is_alert_already_sent(alert.alert_id):
             new_alerts.append(alert)
-            seen_alerts.add(alert.alert_id)
     
     logger.info(f"Found {len(new_alerts)} new alerts (out of {len(alerts)} total)")
     
@@ -3900,6 +3975,17 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
         regular_alerts.sort(key=lambda a: priority_order.get(a.signal_type, 99))
         regular_alerts = regular_alerts[:MAX_REGULAR_SIGNALS]
     
+    # Count ALL signals by type for intro message (not just top 3)
+    signal_counts = {}
+    all_detected_alerts = [alert for alert, _ in tracked_alerts] + new_alerts  # Use new_alerts (all detected) instead of regular_alerts (capped)
+    for alert in all_detected_alerts:
+        signal_type = alert.signal_type
+        signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
+    
+    # Send intro message to Telegram if there are signals to send
+    if USE_TELEGRAM and (tracked_alerts or regular_alerts) and not dry_run:
+        send_telegram_intro(signal_counts, dry_run=dry_run)
+    
     # Send tracked ticker alerts (all of them, no cap)
     for alert, users in tracked_alerts:
         logger.info(f"[TRACKED TICKER] {alert.ticker} - tracked by {len(users)} user(s)")
@@ -3908,6 +3994,9 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
             if telegram_sent:
                 logger.info(f"Alert sent via Telegram: {alert.ticker}")
         send_email_alert(alert, dry_run=dry_run)
+        # Mark as sent in database
+        if not dry_run:
+            mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)
     
     # Send regular signals (capped at 3)
     for alert in regular_alerts:
@@ -3919,10 +4008,9 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
         
         # Always send email as backup or primary
         send_email_alert(alert, dry_run=dry_run)
-    
-    # Save updated state
-    if not dry_run and new_alerts:
-        save_seen_alerts(seen_alerts)
+        # Mark as sent in database
+        if not dry_run:
+            mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)
 
 
 def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: bool = False):

@@ -30,7 +30,7 @@ def store_pnl_in_database():
     logger.info(f"Calculated P&L for {len(pnl_data)} positions")
     
     # Store in database
-    conn = sqlite3.connect('data/congressional_trades.db')
+    conn = sqlite3.connect('data/alphaWhisperer.db')
     cursor = conn.cursor()
     
     # Clear existing data
@@ -75,7 +75,7 @@ def store_pnl_in_database():
     logger.info(f"Stored {inserted} positions in politician_pnl table")
     
     # Show summary
-    conn = sqlite3.connect('data/congressional_trades.db')
+    conn = sqlite3.connect('data/alphaWhisperer.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     

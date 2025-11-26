@@ -145,7 +145,7 @@ def calculate_politician_pnl(politician_id: str = None) -> List[Dict]:
     - unrealized_pnl, realized_pnl
     - pnl_percent
     """
-    conn = sqlite3.connect('data/congressional_trades.db')
+    conn = sqlite3.connect('data/alphaWhisperer.db')
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
