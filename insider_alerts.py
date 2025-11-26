@@ -183,8 +183,12 @@ def get_db():
 
 def init_database():
     """
-    Initialize SQLite database with schema for Congressional trades.
+    Initialize SQLite database with schema for Congressional and OpenInsider trades.
     Creates tables if they don't exist.
+    
+    Note: 
+    - tracked_tickers table is managed by telegram_tracker_polling.py
+    - politician_pnl table is for calculate_pnl.py (separate analysis script)
     """
     with get_db() as conn:
         # Main trades table
