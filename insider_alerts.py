@@ -1328,8 +1328,8 @@ What sector-specific or technical factors could drive this? Be specific to the m
 **RISKS** (2 sentences):
 What could go wrong? Consider valuation, sector headwinds, technical weakness.
 
-**RECOMMENDATION**:
-Be honest based on the full picture. Use STRONG BUY only if metrics are exceptional. Use BUY if solid but not perfect. Use HOLD if mixed signals. Use WAIT if overvalued or weak momentum.
+**RECOMMENDATION** (75 words maximum):
+Provide a clear, actionable recommendation with complete sentences. Use STRONG BUY only if metrics are exceptional. Use BUY if solid but not perfect. Use HOLD if mixed signals. Use WAIT if overvalued or weak momentum. Keep response under 75 words but ensure all sentences are complete.
 
 CRITICAL RULES:
 - Insider buying is just ONE signal - don't automatically recommend STRONG BUY
@@ -1338,6 +1338,7 @@ CRITICAL RULES:
 - Be skeptical and balanced - this is real money
 - If Congressional alignment shows proven traders, emphasize this as a strong signal
 - Base analysis ONLY on data provided above
+- MAXIMUM 75 WORDS - be concise but complete all sentences
 
 Format your response with bold section headers and clear paragraph breaks. DO NOT use markdown ** for bold - just write naturally with good structure."""
         
@@ -3528,10 +3529,9 @@ def format_telegram_message(alert: InsiderAlert) -> str:
                 # Take only first paragraph (stop at double newline or end)
                 if '\n\n' in recommendation:
                     recommendation = recommendation.split('\n\n')[0].strip()
-                # If still too long, take first 250 chars
-                if len(recommendation) > 250:
-                    recommendation = recommendation[:250].strip() + '...'
-                msg += f"\n💡 *AI Insight:*\n{escape_md(recommendation)}\n"
+                # No character limit - AI is instructed to keep under 75 words
+                if recommendation:
+                    msg += f"\n💡 *AI Insight:*\n{escape_md(recommendation)}\n"
         else:
             # Fallback: show first key insight or paragraph
             if 'KEY INSIGHT' in ai_insight:
@@ -3543,14 +3543,14 @@ def format_telegram_message(alert: InsiderAlert) -> str:
                     # Take first paragraph
                     if '\n\n' in insight:
                         insight = insight.split('\n\n')[0].strip()
-                    if len(insight) > 250:
-                        insight = insight[:250].strip() + '...'
-                    msg += f"\n💡 *AI Insight:*\n{escape_md(insight)}\n"
+                    # No character limit - use what AI provides
+                    if insight:
+                        msg += f"\n💡 *AI Insight:*\n{escape_md(insight)}\n"
             else:
-                # Last resort: just show first 200 chars
-                short_insight = ai_insight[:200].strip()
-                if short_insight:
-                    msg += f"\n💡 *AI Insight:*\n{escape_md(short_insight)}\n"
+                # Last resort: show first paragraph of whatever we have
+                first_para = ai_insight.split('\n\n')[0].strip() if '\n\n' in ai_insight else ai_insight.strip()
+                if first_para:
+                    msg += f"\n💡 *AI Insight:*\n{escape_md(first_para)}\n"
     
     except Exception as e:
         logger.warning(f"Could not add context to message: {e}")
