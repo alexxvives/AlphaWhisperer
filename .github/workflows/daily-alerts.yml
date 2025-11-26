@@ -40,11 +40,19 @@ jobs:
 
       - name: Run daily alerts
         env:
+          # Email configuration
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: 587
+          SMTP_USER: ${{ secrets.EMAIL_USER }}
+          SMTP_PASS: ${{ secrets.EMAIL_PASSWORD }}
+          ALERT_TO: ${{ secrets.EMAIL_RECIPIENTS }}
+          # Telegram configuration
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
-          EMAIL_USER: ${{ secrets.EMAIL_USER }}
-          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          USE_TELEGRAM: true
+          # Other settings
+          USE_CAPITOL_TRADES: true
+          USE_NEWS_CONTEXT: true
         run: |
           python run_daily_alerts.py --once
 
