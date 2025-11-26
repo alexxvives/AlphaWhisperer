@@ -217,6 +217,7 @@ def init_database():
         # Create indices for faster queries
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON congressional_trades(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_traded_date ON congressional_trades(traded_date)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_published_date ON congressional_trades(published_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scraped_at ON congressional_trades(scraped_at)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_politician_id ON congressional_trades(politician_id)")
         
@@ -354,7 +355,7 @@ def get_ticker_trades_from_db(ticker: str, limit: int = 50) -> List[Dict]:
             rows = conn.execute("""
                 SELECT * FROM congressional_trades 
                 WHERE ticker = ? 
-                ORDER BY traded_date DESC 
+                ORDER BY published_date DESC 
                 LIMIT ?
             """, (ticker, limit)).fetchall()
             
@@ -377,7 +378,7 @@ def get_ticker_trades_from_db(ticker: str, limit: int = 50) -> List[Dict]:
                     'filed_after_days': str(row['filed_after_days']) if row['filed_after_days'] else "N/A",
                     'filed_after_days_numeric': row['filed_after_days'],
                     'owner': row['owner_type'],
-                    'date': row['traded_date']  # Backwards compatibility
+                    'date': row['published_date']  # Use published_date for signal detection
                 })
             
             return trades
@@ -2371,13 +2372,13 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[I
     if not congressional_trades:
         return alerts
     
-    # Filter to buys only AND recent trades (last 14 days)
+    # Filter to buys only AND recent trades (last 14 days by published_date)
     cutoff_date = datetime.now() - timedelta(days=14)
     buys = []
     for t in congressional_trades:
         if t.get('type', '').upper() in ['BUY', 'PURCHASE']:
-            # Parse published date (stored as YYYY-MM-DD) to check recency
-            date_str = t.get('date', '')
+            # Use published_date (when we found out) not traded_date (when trade occurred)
+            date_str = t.get('published_date', t.get('date', ''))
             
             try:
                 # Parse the date (YYYY-MM-DD format)
