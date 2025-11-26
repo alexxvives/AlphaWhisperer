@@ -38,6 +38,21 @@ jobs:
         run: |
           python -c "import insider_alerts; insider_alerts.init_database()"
 
+      - name: Debug environment variables
+        env:
+          SMTP_USER: ${{ secrets.EMAIL_USER }}
+          SMTP_PASS: ${{ secrets.EMAIL_PASSWORD }}
+          ALERT_TO: ${{ secrets.EMAIL_RECIPIENTS }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_IDS }}
+        run: |
+          echo "Checking environment variables (values hidden):"
+          if [ -z "$SMTP_USER" ]; then echo "SMTP_USER is EMPTY"; else echo "SMTP_USER is set"; fi
+          if [ -z "$SMTP_PASS" ]; then echo "SMTP_PASS is EMPTY"; else echo "SMTP_PASS is set"; fi
+          if [ -z "$ALERT_TO" ]; then echo "ALERT_TO is EMPTY"; else echo "ALERT_TO is set"; fi
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then echo "TELEGRAM_BOT_TOKEN is EMPTY"; else echo "TELEGRAM_BOT_TOKEN is set"; fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then echo "TELEGRAM_CHAT_ID is EMPTY"; else echo "TELEGRAM_CHAT_ID is set"; fi
+
       - name: Run daily alerts
         env:
           # Email configuration
