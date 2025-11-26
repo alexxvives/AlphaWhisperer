@@ -3097,25 +3097,26 @@ def format_email_html(alert: InsiderAlert) -> str:
                     ]
                     
                     # Use flexbox for mobile-responsive layout - span full width
-                    html += '<div style="display:flex; flex-wrap:nowrap; gap:4px; margin:8px 0 20px 0; overflow-x:auto;">'
+                    html += '<div style="display:flex; flex-wrap:wrap; gap:4px; margin:8px 0 20px 0; width:100%;">'
                     for label, days, desc in timeframes:
                         if len(hist) > days:
                             past = hist['Close'].iloc[-days-1]
                             change = ((current - past) / past) * 100
                             color = '#27ae60' if change > 0 else '#e74c3c'
-                            html += f'<div style="flex: 1 1 0; min-width:70px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>{label}:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change:+.1f}%</span></div>'
+                            html += f'<div style="flex: 1 1 70px; min-width:70px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>{label}:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change:+.1f}%</span></div>'
                     html += '</div>'
-            except:
+            except Exception as e:
+                logger.warning(f"Could not fetch full yfinance data for {alert.ticker}: {e}")
                 # Fallback to context data if yfinance fails
-                html += '<div style="display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 20px 0;">'
+                html += '<div style="display:flex; flex-wrap:wrap; gap:4px; margin:8px 0 20px 0; width:100%;">'
                 if context.get("price_change_5d") is not None:
                     change_5d = context["price_change_5d"]
                     color = '#27ae60' if change_5d > 0 else '#e74c3c'
-                    html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>5D:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_5d:+.1f}%</span></div>'
+                    html += f'<div style="flex: 1 1 70px; min-width:70px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>5D:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_5d:+.1f}%</span></div>'
                 if context.get("price_change_1m") is not None:
                     change_1m = context["price_change_1m"]
                     color = '#27ae60' if change_1m > 0 else '#e74c3c'
-                    html += f'<div style="flex: 1 1 calc(50% - 8px); min-width:120px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>1M:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_1m:+.1f}%</span></div>'
+                    html += f'<div style="flex: 1 1 70px; min-width:70px; padding:10px; background:#f8f9fa; border-radius:4px; text-align:center;"><strong>1M:</strong><br><span style="color:{color}; font-weight:600; font-size:1.1em;">{change_1m:+.1f}%</span></div>'
                 html += '</div>'
             
             # Chart below price changes
@@ -3806,7 +3807,7 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         logger.info(f"Skipping duplicate alert: {alert.ticker} - {alert.signal_type} (already sent)")
         return False
     
-    subject = f"[Insider Alert] {subject_prefix}{alert.ticker} — {alert.signal_type}"
+    subject = f"[Insider Whisper] {alert.signal_type}"
     
     # Format email body
     text_body = format_email_text(alert)
@@ -3902,18 +3903,19 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
     # Send tracked ticker alerts (all of them, no cap)
     for alert, users in tracked_alerts:
         logger.info(f"[TRACKED TICKER] {alert.ticker} - tracked by {len(users)} user(s)")
-        logger.info(f"[TESTING] Would send Telegram alert: {alert.ticker} - {alert.signal_type}")
+        if USE_TELEGRAM:
+            telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
+            if telegram_sent:
+                logger.info(f"Alert sent via Telegram: {alert.ticker}")
         send_email_alert(alert, dry_run=dry_run)
     
     # Send regular signals (capped at 3)
     for alert in regular_alerts:
-        # COMMENTED OUT: Telegram sending disabled for testing - alerts logged instead
-        # if USE_TELEGRAM:
-        #     telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
-        #     if telegram_sent:
-        #         logger.info(f"Alert sent via Telegram: {alert.ticker}")
-        
-        logger.info(f"[TESTING] Would send Telegram alert: {alert.ticker} - {alert.signal_type}")
+        # Try Telegram first if enabled
+        if USE_TELEGRAM:
+            telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
+            if telegram_sent:
+                logger.info(f"Alert sent via Telegram: {alert.ticker}")
         
         # Always send email as backup or primary
         send_email_alert(alert, dry_run=dry_run)
