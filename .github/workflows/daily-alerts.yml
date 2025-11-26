@@ -1,0 +1,66 @@
+name: Daily Insider Alerts
+
+on:
+  schedule:
+    # Runs at 8:00 AM UTC every day (3:00 AM EST / 12:00 AM PST)
+    - cron: '0 8 * * *'
+  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+
+jobs:
+  run-alerts:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Download database artifact from previous run
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: database
+          path: data/
+          workflow_conclusion: success
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Initialize database if not exists
+        run: |
+          python -c "import insider_alerts; insider_alerts.init_database()"
+
+      - name: Run daily alerts
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENTS: ${{ secrets.EMAIL_RECIPIENTS }}
+        run: |
+          python run_daily_alerts.py --once
+
+      - name: Upload database artifact for next run
+        uses: actions/upload-artifact@v4
+        if: always() # Upload even if previous steps failed
+        with:
+          name: database
+          path: data/congressional_trades.db
+          retention-days: 90
+          overwrite: true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: logs-daily-${{ github.run_number }}
+          path: logs/
+          retention-days: 7

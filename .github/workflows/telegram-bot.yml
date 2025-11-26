@@ -1,0 +1,62 @@
+name: Telegram Bot Polling
+
+on:
+  schedule:
+    # Runs every 5 minutes
+    - cron: '*/5 * * * *'
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  poll-telegram:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Download database artifact from previous run
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          name: database
+          path: data/
+          workflow_conclusion: success
+          if_no_artifact_found: warn
+        continue-on-error: true
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Initialize database if not exists
+        run: |
+          python -c "import insider_alerts; insider_alerts.init_database()"
+
+      - name: Run Telegram bot polling
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          python telegram_tracker_polling.py
+
+      - name: Upload database artifact for next run
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: database
+          path: data/congressional_trades.db
+          retention-days: 90
+          overwrite: true
+
+      - name: Upload logs
+        uses: actions/upload-artifact@v4
+        if: failure() # Only upload logs if there was an error
+        with:
+          name: logs-telegram-${{ github.run_number }}
+          path: logs/
+          retention-days: 7
