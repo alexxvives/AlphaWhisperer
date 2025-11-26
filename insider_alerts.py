@@ -581,19 +581,13 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
         logger.error(f"Failed to initialize database: {e}")
         return []
     
-    # Check if we need to refresh data (>24 hours old or empty)
-    # Scrape fresh data daily to ensure we have recent trades
+    # Data is now scraped explicitly in run_once() at the same time as OpenInsider
+    # This function just queries the database
     last_scrape = get_last_scrape_time()
-    needs_refresh = (
-        last_scrape is None or 
-        (datetime.now() - last_scrape) > timedelta(hours=24)
-    )
-    
-    if needs_refresh:
-        logger.info("Congressional trades data stale or missing, refreshing from CapitolTrades...")
-        scrape_all_congressional_trades_to_db()
+    if last_scrape:
+        logger.info(f"Using Congressional trades (last updated: {last_scrape})")
     else:
-        logger.info(f"Using cached Congressional trades (last updated: {last_scrape})")
+        logger.warning("No Congressional trades found in database")
     
     # Query database for ticker-specific trades
     if ticker:
@@ -1357,7 +1351,7 @@ Format your response with bold section headers and clear paragraph breaks. DO NO
                 "options": {
                     "temperature": 0.7,
                     "top_p": 0.9,
-                    "max_tokens": 200
+                    "max_tokens": 500
                 }
             },
             timeout=30
@@ -2677,14 +2671,17 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     all_alerts.extend(detect_strategic_investor_buy(df))
     
     # Congressional signals (if enabled)
+    # Congressional data is scraped at the start of run_once() (same time as OpenInsider)
     if USE_CAPITOL_TRADES:
         try:
-            logger.info("Fetching Congressional trades for signal detection")
+            logger.info("Detecting Congressional signals from database")
             congressional_trades = get_congressional_trades()
             
             if congressional_trades:
                 all_alerts.extend(detect_congressional_cluster_buy(congressional_trades))
                 all_alerts.extend(detect_high_conviction_congressional_buy(congressional_trades))
+            else:
+                logger.info("No Congressional trades available for signal detection")
         except Exception as e:
             logger.error(f"Error detecting Congressional signals: {e}", exc_info=True)
     
@@ -4060,6 +4057,15 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         # Fetch and store OpenInsider data
         html = fetch_openinsider_html()
         df = parse_openinsider(html)
+        
+        # Fetch and store Congressional trades (same time as OpenInsider)
+        if USE_CAPITOL_TRADES:
+            try:
+                logger.info("Refreshing Congressional trades data...")
+                scrape_all_congressional_trades_to_db()
+                logger.info("Congressional trades refreshed successfully")
+            except Exception as e:
+                logger.error(f"Failed to refresh Congressional trades: {e}")
         
         # Store in database for deduplication
         new_trades = store_openinsider_trades(df)
