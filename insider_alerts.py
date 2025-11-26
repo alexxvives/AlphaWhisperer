@@ -144,12 +144,32 @@ class InsiderAlert:
         self.alert_id = self._generate_alert_id()
         
     def _generate_alert_id(self) -> str:
-        """Generate unique alert ID."""
-        trade_str = "_".join([
-            f"{row['Ticker']}_{row['Insider Name']}_{row.get('Traded Date', row.get('Trade Date', 'N/A'))}"
-            for _, row in self.trades.iterrows()
-        ])
-        return f"{self.signal_type}_{trade_str}"
+        """Generate simplified unique alert ID: {signal_type}_{ticker}_{investors}_{dates}."""
+        from datetime import datetime
+        
+        ticker = self.ticker
+        
+        # Get unique investor names
+        investors = sorted(set(self.trades['Insider Name'].tolist()))
+        investors_str = "_".join([name.replace(" ", "")[:20] for name in investors[:5]])  # Max 5 names, 20 chars each
+        
+        # Get unique dates in day/month format
+        dates = []
+        for _, row in self.trades.iterrows():
+            date_val = row.get('Trade Date') or row.get('Traded Date')
+            if pd.notna(date_val):
+                if isinstance(date_val, str):
+                    try:
+                        date_obj = datetime.strptime(date_val, "%Y-%m-%d")
+                        dates.append(date_obj.strftime("%d/%m"))
+                    except:
+                        pass
+                else:
+                    dates.append(date_val.strftime("%d/%m"))
+        
+        dates_str = "_".join(sorted(set(dates))[:10])  # Max 10 unique dates
+        
+        return f"{self.signal_type}_{ticker}_{investors_str}_{dates_str}"
 
 
 # ============================================================================
@@ -288,8 +308,8 @@ def is_alert_already_sent(alert_id: str) -> bool:
         logger.error(f"Error checking sent alert: {e}")
         return False
 
-def mark_alert_as_sent(alert_id: str, ticker: str, signal_type: str, expires_days: int = 60):
-    """Mark an alert as sent to prevent duplicates (expires in 60 days)."""
+def mark_alert_as_sent(alert_id: str, ticker: str, signal_type: str, expires_days: int = 30):
+    """Mark an alert as sent to prevent duplicates (expires in 30 days)."""
     try:
         with get_db() as conn:
             expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat()
