@@ -581,11 +581,12 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
         logger.error(f"Failed to initialize database: {e}")
         return []
     
-    # Check if we need to refresh data (>1 hour old or empty)
+    # Check if we need to refresh data (>24 hours old or empty)
+    # Scrape fresh data daily to ensure we have recent trades
     last_scrape = get_last_scrape_time()
     needs_refresh = (
         last_scrape is None or 
-        (datetime.now() - last_scrape) > timedelta(hours=1)
+        (datetime.now() - last_scrape) > timedelta(hours=24)
     )
     
     if needs_refresh:
@@ -3520,17 +3521,39 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         
         # Extract only RECOMMENDATION section
         if 'RECOMMENDATION' in ai_insight:
-            # Get text after RECOMMENDATION
+            # Get text after RECOMMENDATION: (including the colon)
             parts = ai_insight.split('RECOMMENDATION')
             if len(parts) > 1:
                 recommendation = parts[1].strip()
-                # Take only first sentence or paragraph
-                recommendation = recommendation.split('\n')[0].strip()
-                msg += f"\n💡 *Recommendation:*\n{escape_md(recommendation)}\n"
+                # Remove leading colon and whitespace
+                if recommendation.startswith(':'):
+                    recommendation = recommendation[1:].strip()
+                # Take only first paragraph (stop at double newline or end)
+                if '\n\n' in recommendation:
+                    recommendation = recommendation.split('\n\n')[0].strip()
+                # If still too long, take first 250 chars
+                if len(recommendation) > 250:
+                    recommendation = recommendation[:250].strip() + '...'
+                msg += f"\n💡 *AI Insight:*\n{escape_md(recommendation)}\n"
         else:
-            # Fallback: just show first 200 chars
-            short_insight = ai_insight[:200].strip()
-            msg += f"\n💡 *Recommendation:*\n{escape_md(short_insight)}\n"
+            # Fallback: show first key insight or paragraph
+            if 'KEY INSIGHT' in ai_insight:
+                parts = ai_insight.split('KEY INSIGHT')
+                if len(parts) > 1:
+                    insight = parts[1].strip()
+                    if insight.startswith(':'):
+                        insight = insight[1:].strip()
+                    # Take first paragraph
+                    if '\n\n' in insight:
+                        insight = insight.split('\n\n')[0].strip()
+                    if len(insight) > 250:
+                        insight = insight[:250].strip() + '...'
+                    msg += f"\n💡 *AI Insight:*\n{escape_md(insight)}\n"
+            else:
+                # Last resort: just show first 200 chars
+                short_insight = ai_insight[:200].strip()
+                if short_insight:
+                    msg += f"\n💡 *AI Insight:*\n{escape_md(short_insight)}\n"
     
     except Exception as e:
         logger.warning(f"Could not add context to message: {e}")
