@@ -191,7 +191,7 @@ def init_database():
                 filed_after_days INTEGER,
                 owner_type TEXT,
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(politician_name, ticker, traded_date, trade_type, size_range)
+                UNIQUE(politician_name, ticker, traded_date, trade_type, published_date)
             )
         """)
         
@@ -878,6 +878,16 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     continue
             
             logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates")
+            
+            # Commit database every 10 pages to prevent data loss on timeout
+            if total_pages % 10 == 0:
+                try:
+                    conn = sqlite3.connect(DB_FILE)
+                    conn.commit()
+                    conn.close()
+                    logger.info(f"Checkpoint: Database committed at page {total_pages}")
+                except Exception as e:
+                    logger.warning(f"Failed to commit database checkpoint: {e}")
             
             # Track consecutive pages with all duplicates (early stopping optimization)
             if page_trades == 0 and page_dupes > 0:
@@ -3841,11 +3851,13 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
     cleanup_expired_alerts()
     
     try:
-        # Fetch data
+        # Fetch and store OpenInsider data
         html = fetch_openinsider_html()
-        
-        # Parse data
         df = parse_openinsider(html)
+        
+        # Store in database for deduplication
+        new_trades = store_openinsider_trades(df)
+        logger.info(f"Stored OpenInsider data: {new_trades} new trades")
         
         # Filter by date
         if since_date:
