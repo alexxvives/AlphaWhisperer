@@ -92,8 +92,12 @@ MIN_BEARISH_CLUSTER_VALUE = float(os.getenv("MIN_BEARISH_CLUSTER_VALUE", "100000
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 
-# OpenInsider URL
+# OpenInsider URLs
 OPENINSIDER_URL = "http://openinsider.com/latest-insider-trading"
+# Screener URL for last 7 days of trades (fd=7 means filed in last 7 days)
+OPENINSIDER_LAST_WEEK_URL = "http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=7&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=1000&page={page}"
+# Stop scraping if we see this many consecutive duplicates
+DUPLICATE_THRESHOLD = 50
 
 # Title normalization mapping
 TITLE_MAPPING = {
@@ -1949,6 +1953,144 @@ def parse_openinsider(html: str) -> pd.DataFrame:
     return df
 
 
+def check_trade_exists_in_db(ticker: str, insider_name: str, trade_date: str, 
+                              trade_type: str, qty: float, price: float) -> bool:
+    """
+    Check if a trade already exists in the database.
+    
+    Args:
+        ticker: Stock ticker
+        insider_name: Name of insider
+        trade_date: Trade date (YYYY-MM-DD format)
+        trade_type: 'Buy' or 'Sale'
+        qty: Number of shares
+        price: Price per share
+        
+    Returns:
+        True if trade exists, False otherwise
+    """
+    with get_db() as conn:
+        cursor = conn.execute("""
+            SELECT COUNT(*) FROM openinsider_trades
+            WHERE ticker = ? AND insider_name = ? AND trade_date = ?
+              AND trade_type = ? AND qty = ? AND price = ?
+        """, (ticker, insider_name, trade_date, trade_type, qty, price))
+        count = cursor.fetchone()[0]
+        return count > 0
+
+
+def fetch_openinsider_last_week() -> pd.DataFrame:
+    """
+    Fetch ALL trades from the last 7 days using OpenInsider screener.
+    Implements early termination when consecutive duplicates exceed threshold.
+    
+    Returns:
+        DataFrame of all new trades from last week
+    """
+    logger.info("Fetching OpenInsider trades from last 7 days (paginated screener)")
+    
+    all_trades = []
+    page = 1
+    consecutive_duplicates = 0
+    total_new = 0
+    total_duplicates = 0
+    
+    while True:
+        try:
+            # Fetch page
+            url = OPENINSIDER_LAST_WEEK_URL.format(page=page)
+            logger.info(f"Fetching page {page}...")
+            html = fetch_openinsider_html(url)
+            
+            # Parse page
+            df = parse_openinsider_pandas(html)
+            if df is None:
+                df = parse_openinsider_bs4(html)
+            
+            if df is None or len(df) == 0:
+                logger.info(f"No more trades found on page {page}, stopping pagination")
+                break
+            
+            # Normalize the data
+            df = normalize_dataframe(df)
+            
+            if len(df) == 0:
+                logger.info(f"No valid trades on page {page} after normalization, stopping")
+                break
+            
+            # Check each trade for duplicates
+            page_new_count = 0
+            page_duplicate_count = 0
+            
+            for _, row in df.iterrows():
+                ticker = row.get('Ticker', '').strip().upper()
+                insider_name = row.get('Insider Name', '')
+                trade_type = row.get('Trade Type', '')
+                qty = row.get('Qty', 0)
+                price = row.get('Price', 0)
+                
+                # Handle trade date
+                trade_date = row.get('Trade Date')
+                if pd.notna(trade_date):
+                    if isinstance(trade_date, pd.Timestamp):
+                        trade_date_str = trade_date.strftime('%Y-%m-%d')
+                    else:
+                        trade_date_str = str(trade_date)
+                else:
+                    trade_date_str = None
+                
+                # Skip if missing critical data
+                if not ticker or not insider_name or not trade_date_str:
+                    continue
+                
+                # Check if exists in database
+                if check_trade_exists_in_db(ticker, insider_name, trade_date_str, 
+                                           trade_type, qty, price):
+                    page_duplicate_count += 1
+                    consecutive_duplicates += 1
+                else:
+                    page_new_count += 1
+                    consecutive_duplicates = 0  # Reset counter
+                    all_trades.append(row)
+            
+            total_new += page_new_count
+            total_duplicates += page_duplicate_count
+            
+            logger.info(f"  Page {page}: {page_new_count} new, {page_duplicate_count} duplicates "
+                       f"(consecutive: {consecutive_duplicates})")
+            
+            # Early termination: if we see many consecutive duplicates, stop
+            if consecutive_duplicates >= DUPLICATE_THRESHOLD:
+                logger.info(f"Reached {consecutive_duplicates} consecutive duplicates, "
+                           f"stopping pagination (threshold: {DUPLICATE_THRESHOLD})")
+                break
+            
+            # Move to next page
+            page += 1
+            
+            # Safety limit: don't scrape more than 10 pages
+            if page > 10:
+                logger.warning("Reached safety limit of 10 pages, stopping pagination")
+                break
+                
+        except Exception as e:
+            logger.error(f"Error fetching page {page}: {e}", exc_info=True)
+            break
+    
+    logger.info(f"Scraping complete: {total_new} new trades, {total_duplicates} duplicates "
+               f"across {page} page(s)")
+    
+    # Convert to DataFrame
+    if all_trades:
+        result_df = pd.DataFrame(all_trades)
+        return result_df
+    else:
+        # Return empty DataFrame with expected columns
+        return pd.DataFrame(columns=['Ticker', 'Company Name', 'Insider Name', 'Title', 
+                                    'Trade Type', 'Trade Date', 'Value', 'Qty', 
+                                    'Owned', 'Delta Own', 'Price'])
+
+
 def store_openinsider_trades(df: pd.DataFrame) -> int:
     """
     Store OpenInsider trades in database, skipping duplicates.
@@ -2013,6 +2155,50 @@ def store_openinsider_trades(df: pd.DataFrame) -> int:
     
     logger.info(f"Stored {new_count} new OpenInsider trades, {duplicate_count} duplicates skipped")
     return new_count
+
+
+def load_openinsider_trades_from_db(lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
+    """
+    Load all OpenInsider trades from database within the lookback window.
+    
+    Args:
+        lookback_days: Number of days to look back
+        
+    Returns:
+        DataFrame of trades from database
+    """
+    cutoff_date = datetime.now() - timedelta(days=lookback_days)
+    cutoff_date_str = cutoff_date.strftime('%Y-%m-%d')
+    
+    with get_db() as conn:
+        query = """
+            SELECT ticker, company_name, insider_name, insider_title as Title, 
+                   trade_type as 'Trade Type', trade_date as 'Trade Date', 
+                   value as Value, qty as Qty, owned as Owned, 
+                   delta_own as 'Delta Own', price as Price
+            FROM openinsider_trades
+            WHERE trade_date >= ?
+            ORDER BY trade_date DESC
+        """
+        df = pd.read_sql_query(query, conn, params=(cutoff_date_str,))
+    
+    # Convert trade_date to datetime
+    df['Trade Date'] = pd.to_datetime(df['Trade Date'])
+    
+    # Standardize column names
+    df.rename(columns={
+        'ticker': 'Ticker',
+        'company_name': 'Company Name',
+        'insider_name': 'Insider Name'
+    }, inplace=True)
+    
+    # Add Title Normalized column for C-Suite detection
+    if 'Title' in df.columns:
+        df['Title Normalized'] = df['Title'].str.lower().map(TITLE_MAPPING)
+        df['Title Normalized'] = df['Title Normalized'].fillna(df['Title'])
+    
+    logger.info(f"Loaded {len(df)} trades from database within {lookback_days} days")
+    return df
 
 
 def filter_by_lookback(df: pd.DataFrame, lookback_days: int = LOOKBACK_DAYS) -> pd.DataFrame:
@@ -3441,7 +3627,8 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
                     'source': 'Congressional',
                     'ticker': row[0],
                     'company_name': row[1],
-                    'insider_name': f"{row[2]} ({row[3]})",  # "Nancy Pelosi (D)"
+                    'insider_name': row[2],  # Just the name
+                    'party': row[3],  # Store party separately (D, R, I, etc.)
                     'title': 'Member of Congress',
                     'trade_type': row[4],
                     'trade_date': row[5],  # traded_date
@@ -3671,8 +3858,7 @@ def format_telegram_message(alert: InsiderAlert) -> str:
             # Fallback to ticker-based link
             msg += f"\n🔗 [View on Capitol Trades](https://www.capitoltrades.com/trades?ticker={alert.ticker})"
     else:
-        ticker_url = f"http://openinsider.com/search?q={alert.ticker}"
-        msg += f"\n🔗 View on OpenInsider:\n`{ticker_url}`"
+        msg += f"\n🔗 [View on OpenInsider](http://openinsider\\.com/search?q={alert.ticker})"
     return msg
 
 
@@ -4050,23 +4236,27 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             msg += f"*${ticker_esc}*\n\n"
         
         # Trades section with today's date
-        today_str = datetime.now().strftime('%B %d, %Y')  # "November 26, 2025"
+        today_str = datetime.now().strftime('%B %d')  # "November 26"
         today_esc = escape_md(today_str)
-        msg += f"📊 *Activity on {today_esc}*\n\n"
+        msg += f"📊 *Activity on {today_esc}*\n"
         
-        # Sort trades by trade_date descending
-        sorted_trades = sorted(trades, key=lambda t: t.get('trade_date', ''), reverse=True)
+        # Sort trades by trade_date descending, then by trade_type
+        sorted_trades = sorted(trades, key=lambda t: (t.get('trade_date', ''), t.get('trade_type', '')), reverse=True)
         
         # Determine which sources we have
         has_congressional = any(t.get('source') == 'Congressional' for t in sorted_trades)
         has_openinsider = any(t.get('source') == 'OpenInsider' for t in sorted_trades)
         
-        for idx, trade in enumerate(sorted_trades[:10]):  # Limit to 10 trades
-            source = trade.get('source', 'Unknown')
-            insider = escape_md(trade.get('insider_name', 'Unknown'))
-            trade_type = trade.get('trade_type', 'N/A').upper()
+        # Group trades by date and type
+        from collections import defaultdict
+        grouped_trades = defaultdict(lambda: defaultdict(list))
+        for trade in sorted_trades:
             trade_date = trade.get('trade_date', 'N/A')
-            
+            trade_type = trade.get('trade_type', 'N/A').upper()
+            grouped_trades[trade_date][trade_type].append(trade)
+        
+        # Display grouped trades
+        for trade_date in sorted(grouped_trades.keys(), reverse=True):
             # Format date as underlined "Nov 26"
             try:
                 dt = pd.to_datetime(trade_date)
@@ -4075,54 +4265,92 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             except:
                 date_underlined = f"__{escape_md(trade_date)}__"
             
-            # Build trade line
-            if source == 'OpenInsider':
-                value = trade.get('value', 0)
-                price = trade.get('price', 0)
-                owned = trade.get('owned', 0)
-                qty = trade.get('qty', 0)
+            for trade_type in sorted(grouped_trades[trade_date].keys()):
+                # Header: Date - Type
+                msg += f"{date_underlined} \\- {escape_md(trade_type)}\n"
                 
-                # Format value
-                if value >= 1_000_000:
-                    value_str = f"${value/1_000_000:.1f}M"
-                elif value >= 1_000:
-                    value_str = f"${value/1_000:.0f}K"
+                trades_in_group = grouped_trades[trade_date][trade_type]
+                total_trades = len(trades_in_group)
+                
+                # List trades under this date/type (max 5)
+                for idx, trade in enumerate(trades_in_group[:5]):
+                    source = trade.get('source', 'Unknown')
+                    insider_name = trade.get('insider_name', 'Unknown')
+                    
+                    # Add party affiliation for Congressional trades
+                    if source == 'Congressional':
+                        party = trade.get('party', '')
+                        if party:
+                            if party == 'D':
+                                party_label = '(D)'
+                            elif party == 'R':
+                                party_label = '(R)'
+                            else:
+                                party_label = '(O)'
+                            insider_display = f"{insider_name} {party_label}"
+                        else:
+                            insider_display = insider_name
+                    else:
+                        insider_display = insider_name
+                    
+                    insider = escape_md(insider_display)
+                    
+                    # Build trade details
+                    if source == 'OpenInsider':
+                        value = trade.get('value', 0)
+                        price = trade.get('price', 0)
+                        owned = trade.get('owned', 0)
+                        qty = trade.get('qty', 0)
+                        
+                        # Format value
+                        if value >= 1_000_000:
+                            value_str = f"${value/1_000_000:.1f}M"  # Show as M for millions
+                        elif value >= 1_000:
+                            value_str = f"${value/1_000:.0f}K"
+                        else:
+                            value_str = f"${value:.0f}"
+                        value_esc = escape_md(value_str)
+                        
+                        # Format price
+                        price_str = f"@${price:.2f}" if price > 0 else ""
+                        price_esc = escape_md(price_str)
+                        
+                        # Calculate delta (change in ownership)
+                        if owned > 0 and qty != 0:
+                            delta_pct = (qty / (owned - qty)) * 100 if (owned - qty) > 0 else 0
+                            delta_str = f"(+{delta_pct:.1f}%)" if trade_type == 'BUY' else f"(-{abs(delta_pct):.1f}%)"
+                            delta_esc = escape_md(delta_str)
+                        else:
+                            delta_esc = ""
+                        
+                        # Name on one line, details on next line, then line break
+                        msg += f"{insider}\n"
+                        msg += f"{value_esc} {price_esc} {delta_esc}\n\n"
+                        
+                    else:  # Congressional
+                        size_range = trade.get('size_range', 'N/A')
+                        size_esc = escape_md(size_range)
+                        
+                        # Name on one line, amount on next line, then line break
+                        msg += f"{insider}\n"
+                        msg += f"{size_esc}\n\n"
+                
+                # Show +X more if there are more than 5 trades
+                if total_trades > 5:
+                    remaining = total_trades - 5
+                    msg += f"\\.\\.\\.\\ \\+{remaining} more trades\n"
                 else:
-                    value_str = f"${value:.0f}"
-                value_esc = escape_md(value_str)
-                
-                # Format price
-                price_str = f"@${price:.2f}" if price > 0 else ""
-                price_esc = escape_md(price_str)
-                
-                # Calculate delta (change in ownership)
-                if owned > 0 and qty != 0:
-                    delta_pct = (qty / (owned - qty)) * 100 if (owned - qty) > 0 else 0
-                    delta_str = f"(+{delta_pct:.1f}%)" if trade_type == 'BUY' else f"(-{abs(delta_pct):.1f}%)"
-                    delta_esc = escape_md(delta_str)
-                else:
-                    delta_esc = ""
-                
-                msg += f"{date_underlined} \\- {escape_md(trade_type)}\\n"
-                msg += f"{insider} {value_esc} {price_esc} {delta_esc}\\n\\n"
-                
-            else:  # Congressional
-                size_range = trade.get('size_range', 'N/A')
-                size_esc = escape_md(size_range)
-                
-                msg += f"{date_underlined} \\- {escape_md(trade_type)}\\n"
-                msg += f"{insider} {size_esc}\\n\\n"
+                    # Remove one trailing line break from the last trade
+                    if msg.endswith("\n\n"):
+                        msg = msg[:-1]  # Remove one \n
         
-        if len(sorted_trades) > 10:
-            remaining = len(sorted_trades) - 10
-            msg += f"_\\.\\.\\. and {remaining} more trade{'s' if remaining != 1 else ''}_\\n\\n"
-        
-        # Footer with links (based on sources)
+        # Footer with links (based on sources) - add line break before links
+        msg += "\n"
         links = []
         if has_congressional:
-            links.append(f"[Capitol Trades](https://www\\.capitoltrades\\.com/trades?ticker={ticker_esc})")
+            links.append(f"[View on Capitol Trades](https://www\\.capitoltrades\\.com/trades?ticker={ticker_esc})")
         if has_openinsider:
-            links.append(f"[OpenInsider](http://openinsider\\.com/screener?s={ticker_esc})")
+            links.append(f"[View on OpenInsider](http://openinsider\\.com/screener?s={ticker_esc})")
         
         if links:
             separator = " \\| "
@@ -4235,7 +4463,7 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         return False
 
 
-def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_count: int = 0):
+def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_activity: Optional[List] = None):
     """
     Process list of alerts: check if new, send emails, update state.
     
@@ -4292,6 +4520,7 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
     
     # Add tracked ticker count if provided
+    tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
     if tracked_ticker_count > 0:
         signal_counts['Tracked Tickers'] = tracked_ticker_count
     
@@ -4299,27 +4528,29 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     if USE_TELEGRAM and (tracked_ticker_count > 0 or tracked_alerts or regular_alerts) and not dry_run:
         send_telegram_intro(signal_counts, dry_run=dry_run)
     
-    # Send tracked ticker alerts (all of them, no cap)
-    for alert, users in tracked_alerts:
-        logger.info(f"[TRACKED TICKER] {alert.ticker} - tracked by {len(users)} user(s)")
+    # Send regular signals to Telegram (capped at 3)
+    for alert in regular_alerts:
         if USE_TELEGRAM:
             telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
             if telegram_sent:
                 logger.info(f"Alert sent via Telegram: {alert.ticker}")
+    
+    # Send tracked ticker alerts to Telegram (all of them, no cap)
+    if tracked_ticker_activity:
+        for ticker, tracking_users, trades in tracked_ticker_activity:
+            if not dry_run:
+                send_tracked_ticker_alert(ticker, tracking_users, trades, dry_run=dry_run)
+    
+    # Send tracked ticker alerts via email (all of them)
+    for alert, users in tracked_alerts:
+        logger.info(f"[TRACKED TICKER] {alert.ticker} - tracked by {len(users)} user(s)")
         send_email_alert(alert, dry_run=dry_run)
         # Mark as sent in database
         if not dry_run:
             mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)
     
-    # Send regular signals (capped at 3)
+    # Send regular signals via email (capped at 3)
     for alert in regular_alerts:
-        # Try Telegram first if enabled
-        if USE_TELEGRAM:
-            telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
-            if telegram_sent:
-                logger.info(f"Alert sent via Telegram: {alert.ticker}")
-        
-        # Always send email as backup or primary
         send_email_alert(alert, dry_run=dry_run)
         # Mark as sent in database
         if not dry_run:
@@ -4347,9 +4578,8 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
     cleanup_expired_alerts()
     
     try:
-        # Fetch and store OpenInsider data
-        html = fetch_openinsider_html()
-        df = parse_openinsider(html)
+        # Fetch and store OpenInsider data using new pagination approach
+        df = fetch_openinsider_last_week()
         
         # Fetch and store Congressional trades (same time as OpenInsider)
         if USE_CAPITOL_TRADES:
@@ -4364,29 +4594,24 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         new_trades = store_openinsider_trades(df)
         logger.info(f"Stored OpenInsider data: {new_trades} new trades")
         
-        # Check for tracked ticker activity (BEFORE regular signal detection)
-        # This sends alerts for ANY activity on tracked tickers, separate from signals
-        tracked_ticker_activity = detect_tracked_ticker_activity()
-        tracked_ticker_count = 0
-        if tracked_ticker_activity and not dry_run:
-            logger.info(f"Found activity on {len(tracked_ticker_activity)} tracked ticker(s)")
-            for ticker, tracking_users, trades in tracked_ticker_activity:
-                send_tracked_ticker_alert(ticker, tracking_users, trades, dry_run=dry_run)
-                tracked_ticker_count += 1
+        # Load ALL trades from database for signal detection (not just new ones!)
+        df = load_openinsider_trades_from_db(lookback_days=LOOKBACK_DAYS)
         
-        # Filter by date
+        # Check for tracked ticker activity (detect but don't send yet)
+        tracked_ticker_activity = detect_tracked_ticker_activity()
+        tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
+        
+        # Apply date filter if provided
         if since_date:
             since_dt = datetime.strptime(since_date, "%Y-%m-%d")
             df = df[df["Trade Date"] >= since_dt]
             logger.info(f"Filtered to trades since {since_date}: {len(df)} rows")
-        else:
-            df = filter_by_lookback(df)
         
-        # Detect signals
+        # Detect signals from ALL trades in database
         alerts = detect_signals(df)
         
-        # Process alerts (pass tracked ticker count for intro message)
-        process_alerts(alerts, dry_run=dry_run, tracked_ticker_count=tracked_ticker_count)
+        # Process alerts (pass tracked ticker activity for sending with signals)
+        process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity)
         
         logger.info("Check completed successfully")
         logger.info("=" * 60)
