@@ -3373,6 +3373,97 @@ def get_users_tracking_ticker(ticker: str) -> List[Dict[str, str]]:
         return []
 
 
+def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]:
+    """
+    Check for ANY activity (OpenInsider or Congressional trades) on tracked tickers.
+    Returns activity regardless of signal thresholds - ANY trade triggers notification.
+    
+    Returns:
+        List of tuples: (ticker, tracking_users, trades)
+        - ticker: Stock symbol
+        - tracking_users: List of {user_id, username, first_name}
+        - trades: List of trade dicts with combined OpenInsider + Congressional data
+    """
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        # Get all tracked tickers
+        cursor.execute("SELECT DISTINCT ticker FROM tracked_tickers")
+        tracked_tickers = [row[0] for row in cursor.fetchall()]
+        
+        if not tracked_tickers:
+            return []
+        
+        logger.info(f"Checking activity for {len(tracked_tickers)} tracked ticker(s): {', '.join(tracked_tickers)}")
+        
+        results = []
+        cutoff_date = (datetime.now() - timedelta(days=LOOKBACK_DAYS)).strftime('%Y-%m-%d')
+        
+        for ticker in tracked_tickers:
+            all_trades = []
+            
+            # Check OpenInsider trades
+            cursor.execute("""
+                SELECT ticker, company_name, insider_name, insider_title, trade_type, 
+                       trade_date, value, qty, owned, price
+                FROM openinsider_trades
+                WHERE ticker = ? AND trade_date >= ?
+                ORDER BY trade_date DESC
+            """, (ticker, cutoff_date))
+            
+            for row in cursor.fetchall():
+                all_trades.append({
+                    'source': 'OpenInsider',
+                    'ticker': row[0],
+                    'company_name': row[1],
+                    'insider_name': row[2],
+                    'title': row[3] or 'Insider',
+                    'trade_type': row[4],
+                    'trade_date': row[5],
+                    'value': row[6],
+                    'qty': row[7],
+                    'owned': row[8],
+                    'price': row[9]
+                })
+            
+            # Check Congressional trades
+            cursor.execute("""
+                SELECT ticker, company_name, politician_name, party, trade_type,
+                       traded_date, published_date, size_range
+                FROM congressional_trades
+                WHERE ticker = ? AND published_date >= ?
+                ORDER BY published_date DESC
+            """, (ticker, cutoff_date))
+            
+            for row in cursor.fetchall():
+                all_trades.append({
+                    'source': 'Congressional',
+                    'ticker': row[0],
+                    'company_name': row[1],
+                    'insider_name': f"{row[2]} ({row[3]})",  # "Nancy Pelosi (D)"
+                    'title': 'Member of Congress',
+                    'trade_type': row[4],
+                    'trade_date': row[5],  # traded_date
+                    'published_date': row[6],
+                    'size_range': row[7]
+                })
+            
+            if all_trades:
+                # Get users tracking this ticker
+                tracking_users = get_users_tracking_ticker(ticker)
+                if tracking_users:
+                    results.append((ticker, tracking_users, all_trades))
+                    logger.info(f"Found {len(all_trades)} trade(s) for tracked ticker {ticker} (tracked by {len(tracking_users)} user(s))")
+        
+        conn.close()
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error detecting tracked ticker activity: {e}")
+        return []
+
+
 def format_telegram_message(alert: InsiderAlert) -> str:
     """Format alert as Telegram message with markdown."""
     # Escape special characters for Telegram MarkdownV2
@@ -3899,6 +3990,161 @@ def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
         return False
 
 
+def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: List[Dict], dry_run: bool = False) -> bool:
+    """
+    Send Telegram alert for tracked ticker activity (no AI insight, just trade info).
+    
+    Args:
+        ticker: Stock ticker symbol
+        tracking_users: List of users tracking this ticker
+        trades: List of trade dictionaries (OpenInsider + Congressional)
+        dry_run: If True, don't actually send
+        
+    Returns:
+        True if sent successfully
+    """
+    if not USE_TELEGRAM:
+        return False
+    
+    if dry_run:
+        logger.info(f"DRY RUN - Would send tracked ticker alert: {ticker}")
+        return True
+    
+    try:
+        import asyncio
+        from telegram import Bot
+        from telegram.constants import ParseMode
+        
+        # Escape markdown
+        def escape_md(text):
+            if not isinstance(text, str):
+                text = str(text)
+            chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+            for char in chars_to_escape:
+                text = text.replace(char, f'\\{char}')
+            return text
+        
+        # Build message
+        msg = f"📌 *TRACKED TICKER ALERT* 📌\n\n"
+        
+        # Company name (get from first trade)
+        company_name = trades[0].get('company_name', ticker)
+        company_esc = escape_md(company_name)
+        ticker_esc = escape_md(ticker)
+        if company_name != ticker:
+            msg += f"*{company_esc} \\(${ticker_esc}\\)*\n\n"
+        else:
+            msg += f"*${ticker_esc}*\n\n"
+        
+        # User mentions
+        mentions = []
+        for user in tracking_users:
+            if user['username']:
+                mentions.append(f"@{user['username']}")
+            else:
+                user_id = user['user_id']
+                first_name = user['first_name'] or 'User'
+                mentions.append(f"[{first_name}](tg://user?id={user_id})")
+        
+        if mentions:
+            msg += f"👤 {', '.join(mentions)}\n\n"
+        
+        # Trades section
+        msg += f"📊 *Recent Activity \\({len(trades)} trade{'s' if len(trades) != 1 else ''}\\):*\n"
+        
+        for idx, trade in enumerate(trades[:10]):  # Limit to 10 trades
+            source = trade.get('source', 'Unknown')
+            insider = escape_md(trade.get('insider_name', 'Unknown'))
+            title = escape_md(trade.get('title', ''))
+            trade_type = escape_md(trade.get('trade_type', 'N/A'))
+            trade_date = trade.get('trade_date', 'N/A')
+            
+            # Format date as "15Nov"
+            try:
+                dt = pd.to_datetime(trade_date)
+                date_str = dt.strftime('%d%b')
+            except:
+                date_str = escape_md(trade_date)
+            
+            # Build trade line
+            if source == 'OpenInsider':
+                value = trade.get('value', 0)
+                if value >= 1_000_000:
+                    value_str = f"${value/1_000_000:.1f}M"
+                elif value >= 1_000:
+                    value_str = f"${value/1_000:.0f}K"
+                else:
+                    value_str = f"${value:.0f}"
+                value_esc = escape_md(value_str)
+                
+                msg += f"  • {date_str}: {insider} \\({title}\\) {trade_type} {value_esc}\n"
+                
+            else:  # Congressional
+                size_range = escape_md(trade.get('size_range', 'N/A'))
+                pub_date = trade.get('published_date', trade_date)
+                try:
+                    pub_dt = pd.to_datetime(pub_date)
+                    pub_str = pub_dt.strftime('%d%b')
+                except:
+                    pub_str = escape_md(pub_date)
+                
+                msg += f"  • {date_str}: {insider} {trade_type} {size_range} \\(pub\\: {pub_str}\\)\n"
+        
+        if len(trades) > 10:
+            remaining = len(trades) - 10
+            msg += f"\n_\\.\\.\\. and {remaining} more trade{'s' if remaining != 1 else ''}_\n"
+        
+        # Footer with link
+        msg += f"\n🔗 [View on Yahoo Finance](https://finance\\.yahoo\\.com/quote/{ticker_esc})"
+        
+        # Generate chart
+        chart_buf = generate_stock_chart(ticker, days=180)
+        
+        # Send via Telegram
+        chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(",")]
+        
+        async def send_message():
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            success_count = 0
+            
+            for chat_id in chat_ids:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=msg,
+                        parse_mode=ParseMode.MARKDOWN_V2,
+                        disable_web_page_preview=True
+                    )
+                    
+                    if chart_buf:
+                        chart_buf.seek(0)
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=chart_buf,
+                            caption=f'{ticker} - Chart'
+                        )
+                        logger.info(f"Chart sent to {chat_id}")
+                    
+                    success_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to send tracked ticker alert to {chat_id}: {e}")
+            
+            return success_count
+        
+        success_count = asyncio.run(send_message())
+        
+        if success_count > 0:
+            logger.info(f"Tracked ticker alert sent successfully: {ticker} ({len(trades)} trades, {len(tracking_users)} users)")
+            return True
+        else:
+            logger.error(f"Failed to send tracked ticker alert: {ticker}")
+            return False
+        
+    except Exception as e:
+        logger.error(f"Error sending tracked ticker alert for {ticker}: {e}")
+        return False
+
+
 def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix: str = "") -> bool:
     """
     Send email alert for detected signal.
@@ -4085,6 +4331,14 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         # Store in database for deduplication
         new_trades = store_openinsider_trades(df)
         logger.info(f"Stored OpenInsider data: {new_trades} new trades")
+        
+        # Check for tracked ticker activity (BEFORE regular signal detection)
+        # This sends alerts for ANY activity on tracked tickers, separate from signals
+        tracked_ticker_activity = detect_tracked_ticker_activity()
+        if tracked_ticker_activity and not dry_run:
+            logger.info(f"Found activity on {len(tracked_ticker_activity)} tracked ticker(s)")
+            for ticker, tracking_users, trades in tracked_ticker_activity:
+                send_tracked_ticker_alert(ticker, tracking_users, trades, dry_run=dry_run)
         
         # Filter by date
         if since_date:
