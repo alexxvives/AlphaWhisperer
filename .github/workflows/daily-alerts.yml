@@ -2,8 +2,8 @@ name: Daily Insider Alerts
 
 on:
   schedule:
-    # Runs at 8:00 AM UTC every day (3:00 AM EST / 12:00 AM PST)
-    - cron: '0 8 * * *'
+    # Runs at 4:00 AM UTC every day (11:00 PM EST previous day)
+    - cron: '0 4 * * *'
   workflow_dispatch: # Allows manual trigger from GitHub Actions UI
 
 jobs:

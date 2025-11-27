@@ -3398,19 +3398,19 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
         logger.info(f"Checking activity for {len(tracked_tickers)} tracked ticker(s): {', '.join(tracked_tickers)}")
         
         results = []
-        cutoff_date = (datetime.now() - timedelta(days=LOOKBACK_DAYS)).strftime('%Y-%m-%d')
+        today = datetime.now().strftime('%Y-%m-%d')
         
         for ticker in tracked_tickers:
             all_trades = []
             
-            # Check OpenInsider trades
+            # Check OpenInsider trades (scraped today = published today)
             cursor.execute("""
                 SELECT ticker, company_name, insider_name, insider_title, trade_type, 
                        trade_date, value, qty, owned, price
                 FROM openinsider_trades
-                WHERE ticker = ? AND trade_date >= ?
+                WHERE ticker = ? AND DATE(scraped_at) = ?
                 ORDER BY trade_date DESC
-            """, (ticker, cutoff_date))
+            """, (ticker, today))
             
             for row in cursor.fetchall():
                 all_trades.append({
@@ -3427,14 +3427,14 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
                     'price': row[9]
                 })
             
-            # Check Congressional trades
+            # Check Congressional trades (published today only)
             cursor.execute("""
                 SELECT ticker, company_name, politician_name, party, trade_type,
                        traded_date, published_date, size_range
                 FROM congressional_trades
-                WHERE ticker = ? AND published_date >= ?
-                ORDER BY published_date DESC
-            """, (ticker, cutoff_date))
+                WHERE ticker = ? AND published_date = ?
+                ORDER BY traded_date DESC
+            """, (ticker, today))
             
             for row in cursor.fetchall():
                 all_trades.append({
@@ -4025,18 +4025,9 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             return text
         
         # Build message
-        msg = f"📌 *TRACKED TICKER ALERT* 📌\n\n"
+        msg = f"📌 *TRACKED TICKER* 📌\n"
         
-        # Company name (get from first trade)
-        company_name = trades[0].get('company_name', ticker)
-        company_esc = escape_md(company_name)
-        ticker_esc = escape_md(ticker)
-        if company_name != ticker:
-            msg += f"*{company_esc} \\(${ticker_esc}\\)*\n\n"
-        else:
-            msg += f"*${ticker_esc}*\n\n"
-        
-        # User mentions
+        # User mentions (right after title, no break line)
         mentions = []
         for user in tracking_users:
             if user['username']:
@@ -4047,28 +4038,51 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
                 mentions.append(f"[{first_name}](tg://user?id={user_id})")
         
         if mentions:
-            msg += f"👤 {', '.join(mentions)}\n\n"
+            msg += f"by {', '.join(mentions)}\n\n"
         
-        # Trades section
-        msg += f"📊 *Recent Activity \\({len(trades)} trade{'s' if len(trades) != 1 else ''}\\):*\n"
+        # Company name
+        company_name = trades[0].get('company_name', ticker)
+        company_esc = escape_md(company_name)
+        ticker_esc = escape_md(ticker)
+        if company_name != ticker:
+            msg += f"*{company_esc} \\(${ticker_esc}\\)*\n\n"
+        else:
+            msg += f"*${ticker_esc}*\n\n"
         
-        for idx, trade in enumerate(trades[:10]):  # Limit to 10 trades
+        # Trades section with today's date
+        today_str = datetime.now().strftime('%B %d, %Y')  # "November 26, 2025"
+        today_esc = escape_md(today_str)
+        msg += f"📊 *Activity on {today_esc}*\n\n"
+        
+        # Sort trades by trade_date descending
+        sorted_trades = sorted(trades, key=lambda t: t.get('trade_date', ''), reverse=True)
+        
+        # Determine which sources we have
+        has_congressional = any(t.get('source') == 'Congressional' for t in sorted_trades)
+        has_openinsider = any(t.get('source') == 'OpenInsider' for t in sorted_trades)
+        
+        for idx, trade in enumerate(sorted_trades[:10]):  # Limit to 10 trades
             source = trade.get('source', 'Unknown')
             insider = escape_md(trade.get('insider_name', 'Unknown'))
-            title = escape_md(trade.get('title', ''))
-            trade_type = escape_md(trade.get('trade_type', 'N/A'))
+            trade_type = trade.get('trade_type', 'N/A').upper()
             trade_date = trade.get('trade_date', 'N/A')
             
-            # Format date as "15Nov"
+            # Format date as underlined "Nov 26"
             try:
                 dt = pd.to_datetime(trade_date)
-                date_str = dt.strftime('%d%b')
+                date_str = dt.strftime('%b %d')
+                date_underlined = f"__{escape_md(date_str)}__"
             except:
-                date_str = escape_md(trade_date)
+                date_underlined = f"__{escape_md(trade_date)}__"
             
             # Build trade line
             if source == 'OpenInsider':
                 value = trade.get('value', 0)
+                price = trade.get('price', 0)
+                owned = trade.get('owned', 0)
+                qty = trade.get('qty', 0)
+                
+                # Format value
                 if value >= 1_000_000:
                     value_str = f"${value/1_000_000:.1f}M"
                 elif value >= 1_000:
@@ -4077,25 +4091,42 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
                     value_str = f"${value:.0f}"
                 value_esc = escape_md(value_str)
                 
-                msg += f"  • {date_str}: {insider} \\({title}\\) {trade_type} {value_esc}\n"
+                # Format price
+                price_str = f"@${price:.2f}" if price > 0 else ""
+                price_esc = escape_md(price_str)
+                
+                # Calculate delta (change in ownership)
+                if owned > 0 and qty != 0:
+                    delta_pct = (qty / (owned - qty)) * 100 if (owned - qty) > 0 else 0
+                    delta_str = f"(+{delta_pct:.1f}%)" if trade_type == 'BUY' else f"(-{abs(delta_pct):.1f}%)"
+                    delta_esc = escape_md(delta_str)
+                else:
+                    delta_esc = ""
+                
+                msg += f"{date_underlined} \\- {escape_md(trade_type)}\\n"
+                msg += f"{insider} {value_esc} {price_esc} {delta_esc}\\n\\n"
                 
             else:  # Congressional
-                size_range = escape_md(trade.get('size_range', 'N/A'))
-                pub_date = trade.get('published_date', trade_date)
-                try:
-                    pub_dt = pd.to_datetime(pub_date)
-                    pub_str = pub_dt.strftime('%d%b')
-                except:
-                    pub_str = escape_md(pub_date)
+                size_range = trade.get('size_range', 'N/A')
+                size_esc = escape_md(size_range)
                 
-                msg += f"  • {date_str}: {insider} {trade_type} {size_range} \\(pub\\: {pub_str}\\)\n"
+                msg += f"{date_underlined} \\- {escape_md(trade_type)}\\n"
+                msg += f"{insider} {size_esc}\\n\\n"
         
-        if len(trades) > 10:
-            remaining = len(trades) - 10
-            msg += f"\n_\\.\\.\\. and {remaining} more trade{'s' if remaining != 1 else ''}_\n"
+        if len(sorted_trades) > 10:
+            remaining = len(sorted_trades) - 10
+            msg += f"_\\.\\.\\. and {remaining} more trade{'s' if remaining != 1 else ''}_\\n\\n"
         
-        # Footer with link
-        msg += f"\n🔗 [View on Yahoo Finance](https://finance\\.yahoo\\.com/quote/{ticker_esc})"
+        # Footer with links (based on sources)
+        links = []
+        if has_congressional:
+            links.append(f"[Capitol Trades](https://www\\.capitoltrades\\.com/trades?ticker={ticker_esc})")
+        if has_openinsider:
+            links.append(f"[OpenInsider](http://openinsider\\.com/screener?s={ticker_esc})")
+        
+        if links:
+            separator = " \\| "
+            msg += f"🔗 {separator.join(links)}"
         
         # Generate chart
         chart_buf = generate_stock_chart(ticker, days=180)
@@ -4204,13 +4235,14 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         return False
 
 
-def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
+def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_count: int = 0):
     """
     Process list of alerts: check if new, send emails, update state.
     
     Args:
         alerts: List of InsiderAlert objects
         dry_run: If True, don't send emails or update state
+        tracked_ticker_count: Number of tracked ticker alerts sent separately
     """
     if not alerts:
         logger.info("No alerts to process")
@@ -4259,12 +4291,12 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False):
         signal_type = alert.signal_type
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
     
-    # Add tracked ticker count separately
-    if tracked_alerts:
-        signal_counts['Tracked Tickers'] = len(tracked_alerts)
+    # Add tracked ticker count if provided
+    if tracked_ticker_count > 0:
+        signal_counts['Tracked Tickers'] = tracked_ticker_count
     
     # Send intro message to Telegram if there are signals to send
-    if USE_TELEGRAM and (tracked_alerts or regular_alerts) and not dry_run:
+    if USE_TELEGRAM and (tracked_ticker_count > 0 or tracked_alerts or regular_alerts) and not dry_run:
         send_telegram_intro(signal_counts, dry_run=dry_run)
     
     # Send tracked ticker alerts (all of them, no cap)
@@ -4335,10 +4367,12 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         # Check for tracked ticker activity (BEFORE regular signal detection)
         # This sends alerts for ANY activity on tracked tickers, separate from signals
         tracked_ticker_activity = detect_tracked_ticker_activity()
+        tracked_ticker_count = 0
         if tracked_ticker_activity and not dry_run:
             logger.info(f"Found activity on {len(tracked_ticker_activity)} tracked ticker(s)")
             for ticker, tracking_users, trades in tracked_ticker_activity:
                 send_tracked_ticker_alert(ticker, tracking_users, trades, dry_run=dry_run)
+                tracked_ticker_count += 1
         
         # Filter by date
         if since_date:
@@ -4351,8 +4385,8 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         # Detect signals
         alerts = detect_signals(df)
         
-        # Process alerts
-        process_alerts(alerts, dry_run=dry_run)
+        # Process alerts (pass tracked ticker count for intro message)
+        process_alerts(alerts, dry_run=dry_run, tracked_ticker_count=tracked_ticker_count)
         
         logger.info("Check completed successfully")
         logger.info("=" * 60)
