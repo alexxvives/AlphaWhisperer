@@ -78,9 +78,9 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 # Congressional Trading (CapitolTrades)
 USE_CAPITOL_TRADES = os.getenv("USE_CAPITOL_TRADES", "true").lower() == "true"
 MIN_CONGRESSIONAL_CLUSTER = int(os.getenv("MIN_CONGRESSIONAL_CLUSTER", "2"))
-CONGRESSIONAL_LOOKBACK_DAYS = int(os.getenv("CONGRESSIONAL_LOOKBACK_DAYS", "7"))
+CONGRESSIONAL_LOOKBACK_DAYS = int(os.getenv("CONGRESSIONAL_LOOKBACK_DAYS", "30"))
 
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
 CLUSTER_DAYS = int(os.getenv("CLUSTER_DAYS", "5"))
 MIN_LARGE_BUY = float(os.getenv("MIN_LARGE_BUY", "250000"))
 MIN_CEO_CFO_BUY = float(os.getenv("MIN_CEO_CFO_BUY", "100000"))
@@ -507,7 +507,7 @@ def get_company_context(ticker: str) -> Dict[str, any]:
             company_name = context.get('company_name', ticker)
             
             # Search for news mentioning the ticker
-            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            week_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
             
             # Try multiple search queries to catch relevant news
             all_articles = newsapi.get_everything(
