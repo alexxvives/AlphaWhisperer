@@ -26,7 +26,11 @@ from io import BytesIO
 
 import pandas as pd
 import requests
-import schedule
+# schedule is optional (only used for continuous mode, not run_once)
+try:
+    import schedule
+except ImportError:
+    schedule = None
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from tenacity import (
@@ -312,8 +316,12 @@ def is_alert_already_sent(alert_id: str) -> bool:
         logger.error(f"Error checking sent alert: {e}")
         return False
 
-def mark_alert_as_sent(alert_id: str, ticker: str, signal_type: str, expires_days: int = 30):
+def mark_alert_as_sent(alert_id: str, ticker: str, signal_type: str, expires_days: int = 30, test_mode: bool = False):
     """Mark an alert as sent to prevent duplicates (expires in 30 days)."""
+    if test_mode:
+        logger.info(f"[TEST MODE] Would mark alert as sent: {alert_id} (expires in {expires_days} days)")
+        return
+    
     try:
         with get_db() as conn:
             expires_at = (datetime.now() + timedelta(days=expires_days)).isoformat()
@@ -2538,305 +2546,179 @@ def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     return alerts
 
 
-def detect_congressional_cluster_buy(congressional_trades: List[Dict]) -> List[InsiderAlert]:
+def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) -> List[InsiderAlert]:
     """
-    Detect Congressional Cluster Buy: 2+ politicians buy same ticker within 7 days.
+    Detect Congressional Cluster Buy: 3+ distinct politicians buy same ticker within 30 days.
     
     This is a strong signal because:
     - Multiple politicians with insider info act together
     - Often indicates upcoming policy/regulatory changes
     - Bipartisan agreement is especially powerful
     
-    Args:
-        congressional_trades: List of Congressional trade dictionaries
-        
+    Uses published_date (when we found out) for lookback window, not traded_date.
+    
     Returns:
         List of InsiderAlert objects
     """
     alerts = []
     
-    if not congressional_trades:
-        return alerts
-    
-    # Filter to buys only AND recent trades (last 14 days by published_date)
-    cutoff_date = datetime.now() - timedelta(days=14)
-    buys = []
-    for t in congressional_trades:
-        if t.get('type', '').upper() in ['BUY', 'PURCHASE']:
-            # Use published_date (when we found out) not traded_date (when trade occurred)
-            date_str = t.get('published_date', t.get('date', ''))
+    try:
+        # Query database directly for cluster buys (last 30 days by published_date)
+        with get_db() as conn:
+            query = """
+                SELECT ticker, COUNT(DISTINCT politician_name) as num_politicians,
+                       GROUP_CONCAT(DISTINCT politician_name) as politicians,
+                       GROUP_CONCAT(DISTINCT party) as parties
+                FROM congressional_trades
+                WHERE trade_type = "BUY"
+                AND published_date >= date("now", "-30 days")
+                GROUP BY ticker
+                HAVING COUNT(DISTINCT politician_name) >= 3
+                ORDER BY num_politicians DESC
+            """
+            cursor = conn.execute(query)
+            clusters = cursor.fetchall()
             
-            try:
-                # Parse the date (YYYY-MM-DD format)
-                pub_date = pd.to_datetime(date_str)
+            for cluster in clusters:
+                ticker = cluster['ticker']
+                num_politicians = cluster['num_politicians']
+                politicians = cluster['politicians'].split(',')
+                parties = cluster['parties'].split(',')
                 
-                if pub_date >= cutoff_date:
-                    buys.append(t)
-            except:
-                # If we can't parse the date, skip it
-                pass
-    
-    if len(buys) < 2:
-        return alerts
-    
-    # Group by ticker
-    ticker_groups = {}
-    for trade in buys:
-        ticker = trade.get('ticker', 'N/A')
-        if ticker != 'N/A':
-            if ticker not in ticker_groups:
-                ticker_groups[ticker] = []
-            ticker_groups[ticker].append(trade)
-    
-    # Check for clusters (MIN_CONGRESSIONAL_CLUSTER+ politicians buying same ticker)
-    for ticker, trades in ticker_groups.items():
-        # Filter to trades ≥$50K (using max of size range)
-        significant_trades = []
-        for t in trades:
-            size_str = t.get('size', '')
-            if size_str:
-                import re
-                # Extract max value from range
-                if '-' in size_str:
-                    parts = size_str.split('-')
-                    if len(parts) == 2:
-                        max_match = re.search(r'(\d+)K', parts[1])
-                        if max_match and int(max_match.group(1)) >= 50:
-                            significant_trades.append(t)
-                else:
-                    # Single value like "100K+"
-                    match = re.search(r'(\d+)K', size_str)
-                    if match and int(match.group(1)) >= 50:
-                        significant_trades.append(t)
+                # Check if bipartisan
+                has_dem = 'D' in parties
+                has_rep = 'R' in parties
+                is_bipartisan = has_dem and has_rep
+                
+                # Get individual trades for this ticker cluster
+                trade_query = """
+                    SELECT politician_name, party, chamber, size_range, 
+                           traded_date, published_date, filed_after_days, price
+                    FROM congressional_trades
+                    WHERE ticker = ?
+                    AND trade_type = "BUY"
+                    AND published_date >= date("now", "-30 days")
+                    ORDER BY published_date DESC
+                """
+                trade_cursor = conn.execute(trade_query, (ticker,))
+                trades = trade_cursor.fetchall()
+                
+                # Build DataFrame for display
+                trades_data = []
+                for trade in trades:
+                    # Convert date strings to datetime objects
+                    trade_date = pd.to_datetime(trade['traded_date']) if trade['traded_date'] else pd.NaT
+                    published_date = pd.to_datetime(trade['published_date']) if trade['published_date'] else pd.NaT
+                    
+                    trades_data.append({
+                        "Ticker": ticker,
+                        "Insider Name": f"{trade['politician_name']} ({trade['party']})",
+                        "Title": trade['chamber'] or 'Congress',
+                        "Trade Date": trade_date,
+                        "Published Date": published_date,
+                        "Size Range": trade['size_range'],
+                        "Filed After": f"{trade['filed_after_days']} days" if trade['filed_after_days'] else 'N/A',
+                        "Price": f"${trade['price']:.2f}" if trade['price'] else 'N/A'
+                    })
+                trades_df = pd.DataFrame(trades_data)
+                
+                signal_type = "Congressional Cluster Buy"
+                if is_bipartisan:
+                    signal_type = "Bipartisan Congressional Cluster"
+                
+                alert = InsiderAlert(
+                    signal_type=signal_type,
+                    ticker=ticker,
+                    company_name=ticker,  # Will be fetched later
+                    trades=trades_df,
+                    details={
+                        "num_politicians": num_politicians,
+                        "politicians": politicians[:5],
+                        "bipartisan": is_bipartisan
+                    }
+                )
+                alerts.append(alert)
         
-        if not significant_trades:
-            continue
-            
-        # Get unique politicians for this ticker (from significant trades only)
-        unique_politicians = set(t.get('politician', '') for t in significant_trades)
-        
-        if len(unique_politicians) >= MIN_CONGRESSIONAL_CLUSTER:
-            trades = significant_trades  # Use filtered trades
-            # Check if bipartisan
-            politicians = list(unique_politicians)
-            has_dem = any('(D)' in p for p in politicians)
-            has_rep = any('(R)' in p for p in politicians)
-            is_bipartisan = has_dem and has_rep
-            
-            # Create DataFrame for display (map Congressional fields to expected columns)
-            trades_data = []
-            for trade in trades:
-                # Parse traded date - handle formats like "16 Oct" or "2025-11-18"
-                traded_date_str = trade.get('traded_date', trade.get('date', 'Recent'))
-                try:
-                    if '-' in traded_date_str:
-                        trade_date = pd.to_datetime(traded_date_str)
-                    else:
-                        # Format like "16 Oct" - add current year
-                        trade_date = pd.to_datetime(f"{traded_date_str} {datetime.now().year}", format='%d %b %Y')
-                except:
-                    trade_date = datetime.now()
-                
-                # Parse published date
-                published_date_str = trade.get('date', 'Recent')
-                try:
-                    if '-' in published_date_str:
-                        published_date = pd.to_datetime(published_date_str)
-                    else:
-                        published_date = pd.to_datetime(f"{published_date_str} {datetime.now().year}", format='%d %b %Y')
-                except:
-                    published_date = datetime.now()
-                
-                # Use size range as value display (e.g., "1K-15K", "100K-250K")
-                size_display = trade.get('size', '')
-                
-                trades_data.append({
-                    "Ticker": ticker,
-                    "Insider Name": trade.get('politician', 'Unknown'),
-                    "Politician ID": trade.get('politician_id', ''),
-                    "Traded Date": trade_date,
-                    "Published Date": published_date,
-                    "Filed After": trade.get('filed_after', 'N/A'),
-                    "Title": trade.get('chamber', 'Congress'),
-                    "Value": 0,  # Not used for Congressional (we use size_range)
-                    "Size Range": size_display,
-                    "Price": trade.get('price', '')
-                })
-            trades_df = pd.DataFrame(trades_data)
-            
-            signal_type = "Congressional Cluster Buy"
-            if is_bipartisan:
-                signal_type = "Bipartisan Congressional Buy"
-            
-            alert = InsiderAlert(
-                signal_type=signal_type,
-                ticker=ticker,
-                company_name=ticker,  # Will be fetched later in email formatting
-                trades=trades_df,
-                details={
-                    "num_politicians": len(unique_politicians),
-                    "politicians": politicians[:5],  # First 5
-                    "bipartisan": is_bipartisan,
-                    "dates": [t.get('date', 'Recent') for t in trades]
-                }
-            )
-            alerts.append(alert)
+        logger.info(f"Detected {len(alerts)} Congressional cluster buy signals")
+    except Exception as e:
+        logger.error(f"Error detecting Congressional cluster buys: {e}", exc_info=True)
     
-    logger.info(f"Detected {len(alerts)} Congressional cluster buy signals")
     return alerts
 
 
-def detect_high_conviction_congressional_buy(congressional_trades: List[Dict]) -> List[InsiderAlert]:
+def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> List[InsiderAlert]:
     """
-    Detect High-Conviction Congressional Buy: Single politician with strong signal.
+    Detect Large Congressional Buy: Single politician with purchase >$100K in last 7 days.
     
     Triggers when:
-    - Known successful trader (track record)
-    - Large purchase ($100K+)
-    - Committee-aligned purchase
+    - Purchase size ≥$100K (size_range: 100K–250K, 250K–500K, 500K–1M, 1M–5M, etc.)
+    - Published within last 7 days
     
-    Note: For MVP, we filter by purchase size. Future enhancement: track record & committee data.
+    Uses published_date (when disclosed) for lookback window, not traded_date.
     
-    Args:
-        congressional_trades: List of Congressional trade dictionaries
-        
     Returns:
         List of InsiderAlert objects
     """
     alerts = []
     
-    if not congressional_trades:
-        return alerts
-    
-    # Filter to buys only AND recent trades (last 14 days)
-    cutoff_date = datetime.now() - timedelta(days=14)
-    buys = []
-    for t in congressional_trades:
-        if t.get('type', '').upper() in ['BUY', 'PURCHASE']:
-            # Parse published date (stored as YYYY-MM-DD) to check recency
-            date_str = t.get('date', '')
+    try:
+        # Query database for large buys (last 7 days by published_date, size ≥$100K)
+        with get_db() as conn:
+            query = """
+                SELECT politician_name, politician_id, party, chamber, state,
+                       ticker, company_name, size_range, price,
+                       traded_date, published_date, filed_after_days
+                FROM congressional_trades
+                WHERE trade_type = "BUY"
+                AND published_date >= date("now", "-7 days")
+                AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' 
+                     OR size_range LIKE '%500K%' OR size_range LIKE '%1M%' 
+                     OR size_range LIKE '%5M%' OR size_range LIKE '%25M%'
+                     OR size_range LIKE '>%')
+                ORDER BY published_date DESC
+            """
+            cursor = conn.execute(query)
+            large_buys = cursor.fetchall()
             
-            try:
-                # Parse the date (YYYY-MM-DD format)
-                pub_date = pd.to_datetime(date_str)
+            for trade in large_buys:
+                ticker = trade['ticker']
+                politician = f"{trade['politician_name']} ({trade['party']})"
                 
-                if pub_date >= cutoff_date:
-                    buys.append(t)
-            except:
-                # If we can't parse the date, skip it
-                pass
-    
-    # Known high-performing traders - politicians with documented above-average returns
-    top_traders = [
-        # Top performers (frequently mentioned in trading tracking)
-        'Nancy Pelosi', 'Paul Pelosi', 'Josh Gottheimer', 'Michael McCaul',
-        'Tommy Tuberville', 'Dan Crenshaw', 'Brian Higgins', 'Mark Green',
-        'Marjorie Taylor Greene', 'Austin Scott', 'French Hill', 'Pat Fallon',
-        
-        # Senate traders
-        'Dianne Feinstein', 'Richard Burr', 'Kelly Loeffler', 'David Perdue',
-        'Sheldon Whitehouse', 'John Hoeven', 'Steve Daines', 'Gary Peters',
-        'Ron Wyden', 'Rand Paul', 'Mitt Romney', 'Mark Warner',
-        
-        # House traders - active and tracked
-        'Ro Khanna', 'Susie Lee', 'Dean Phillips', 'Kathy Manning',
-        'Nicole Malliotakis', 'Blake Moore', 'John Curtis', 'Kevin Hern',
-        'Virginia Foxx', 'Earl Blumenauer', 'Alan Lowenthal', 'Kurt Schrader',
-        'Debbie Dingell', 'Suzan DelBene', 'Scott Peters', 'Jim Himes',
-        
-        # Notable recent activity
-        'Lloyd Doggett', 'Lois Frankel', 'Josh Harder', 'Sara Jacobs',
-        'Gregory Meeks', 'Pete Sessions', 'Michael Guest', 'Barry Moore',
-        'Diana Harshbarger', 'Carol Miller', 'Randy Feenstra', 'Mike Garcia',
-        'Maria Salazar', 'Carlos Gimenez', 'Darrell Issa', 'Michelle Steel'
-    ]
-    
-    for trade in buys:
-        politician = trade.get('politician', '')
-        ticker = trade.get('ticker', 'N/A')
-        
-        if ticker == 'N/A':
-            continue
-        
-        # Check if this politician is a known successful trader
-        is_top_trader = any(trader in politician for trader in top_traders)
-        
-        # Filter by minimum size (≥$50K) - parse size range
-        size_str = trade.get('size', '')
-        meets_size_threshold = False
-        
-        # Size ranges like "50K-100K", "100K-250K", "250K-500K", etc.
-        if size_str:
-            # Extract max value from range (conservative: "50K-100K" -> use 100K)
-            import re
-            match = re.search(r'(\d+)K', size_str)
-            if match:
-                max_value_k = int(match.group(1))
-                # Check if max of range is ≥50K
-                if '-' in size_str:
-                    # Get the second number (max) from "X-Y"
-                    parts = size_str.split('-')
-                    if len(parts) == 2:
-                        max_match = re.search(r'(\d+)K', parts[1])
-                        if max_match:
-                            max_value_k = int(max_match.group(1))
+                # Convert date strings to datetime objects
+                trade_date = pd.to_datetime(trade['traded_date']) if trade['traded_date'] else pd.NaT
+                published_date = pd.to_datetime(trade['published_date']) if trade['published_date'] else pd.NaT
                 
-                meets_size_threshold = max_value_k >= 50
+                # Build DataFrame for display
+                trades_data = [{
+                    "Ticker": ticker,
+                    "Insider Name": politician,
+                    "Title": f"{trade['chamber'] or 'Congress'} - {trade['state']}",
+                    "Trade Date": trade_date,
+                    "Published Date": published_date,
+                    "Size Range": trade['size_range'],
+                    "Filed After": f"{trade['filed_after_days']} days" if trade['filed_after_days'] else 'N/A',
+                    "Price": f"${trade['price']:.2f}" if trade['price'] else 'N/A'
+                }]
+                trades_df = pd.DataFrame(trades_data)
+                
+                alert = InsiderAlert(
+                    signal_type="Large Congressional Buy",
+                    ticker=ticker,
+                    company_name=trade['company_name'] or ticker,
+                    trades=trades_df,
+                    details={
+                        "politician": trade['politician_name'],
+                        "party": trade['party'],
+                        "size": trade['size_range'],
+                        "published_date": trade['published_date']
+                    }
+                )
+                alerts.append(alert)
         
-        if is_top_trader and meets_size_threshold:
-            # Create DataFrame for display (map Congressional fields to expected columns)
-            # Parse traded date - handle formats like "16 Oct" or "2025-11-18"
-            traded_date_str = trade.get('traded_date', trade.get('date', 'Recent'))
-            try:
-                if '-' in traded_date_str:
-                    trade_date = pd.to_datetime(traded_date_str)
-                else:
-                    # Format like "16 Oct" - add current year
-                    trade_date = pd.to_datetime(f"{traded_date_str} {datetime.now().year}", format='%d %b %Y')
-            except:
-                trade_date = datetime.now()
-            
-            # Parse published date
-            published_date_str = trade.get('date', 'Recent')
-            try:
-                if '-' in published_date_str:
-                    published_date = pd.to_datetime(published_date_str)
-                else:
-                    published_date = pd.to_datetime(f"{published_date_str} {datetime.now().year}", format='%d %b %Y')
-            except:
-                published_date = datetime.now()
-            
-            # Use size range as value display (e.g., "1K-15K", "100K-250K")
-            size_display = trade.get('size', '')
-            
-            trades_data = {
-                "Ticker": ticker,
-                "Insider Name": politician,
-                "Politician ID": trade.get('politician_id', ''),
-                "Traded Date": trade_date,
-                "Published Date": published_date,
-                "Filed After": trade.get('filed_after', 'N/A'),
-                "Title": trade.get('chamber', 'Congress'),
-                "Value": 0,  # Not used for Congressional (we use size_range)
-                "Size Range": size_display,
-                "Price": trade.get('price', '')
-            }
-            trades_df = pd.DataFrame([trades_data])
-            
-            alert = InsiderAlert(
-                signal_type="Congressional Buy",
-                ticker=ticker,
-                company_name=ticker,  # Will be fetched later in email formatting
-                trades=trades_df,
-                details={
-                    "politician": politician,
-                    "date": trade.get('date', 'Recent'),
-                    "known_trader": True
-                }
-            )
-            alerts.append(alert)
+        logger.info(f"Detected {len(alerts)} large Congressional buy signals")
+    except Exception as e:
+        logger.error(f"Error detecting large Congressional buys: {e}", exc_info=True)
     
-    logger.info(f"Detected {len(alerts)} high-conviction Congressional buy signals")
     return alerts
 
 
@@ -2868,13 +2750,9 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     if USE_CAPITOL_TRADES:
         try:
             logger.info("Detecting Congressional signals from database")
-            congressional_trades = get_congressional_trades()
-            
-            if congressional_trades:
-                all_alerts.extend(detect_congressional_cluster_buy(congressional_trades))
-                all_alerts.extend(detect_high_conviction_congressional_buy(congressional_trades))
-            else:
-                logger.info("No Congressional trades available for signal detection")
+            # New approach: Query database directly (no need to pass trades list)
+            all_alerts.extend(detect_congressional_cluster_buy())
+            all_alerts.extend(detect_large_congressional_buy())
         except Exception as e:
             logger.error(f"Error detecting Congressional signals: {e}", exc_info=True)
     
@@ -3584,19 +3462,19 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
         logger.info(f"Checking activity for {len(tracked_tickers)} tracked ticker(s): {', '.join(tracked_tickers)}")
         
         results = []
-        today = datetime.now().strftime('%Y-%m-%d')
+        lookback_date = (datetime.now() - timedelta(days=LOOKBACK_DAYS)).strftime('%Y-%m-%d')
         
         for ticker in tracked_tickers:
             all_trades = []
             
-            # Check OpenInsider trades (scraped today = published today)
+            # Check OpenInsider trades (last 7 days by trade_date)
             cursor.execute("""
                 SELECT ticker, company_name, insider_name, insider_title, trade_type, 
                        trade_date, value, qty, owned, price
                 FROM openinsider_trades
-                WHERE ticker = ? AND DATE(scraped_at) = ?
+                WHERE ticker = ? AND trade_date >= ?
                 ORDER BY trade_date DESC
-            """, (ticker, today))
+            """, (ticker, lookback_date))
             
             for row in cursor.fetchall():
                 all_trades.append({
@@ -3613,14 +3491,14 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
                     'price': row[9]
                 })
             
-            # Check Congressional trades (published today only)
+            # Check Congressional trades (last 7 days by published_date)
             cursor.execute("""
                 SELECT ticker, company_name, politician_name, party, trade_type,
                        traded_date, published_date, size_range
                 FROM congressional_trades
-                WHERE ticker = ? AND published_date = ?
-                ORDER BY traded_date DESC
-            """, (ticker, today))
+                WHERE ticker = ? AND published_date >= ?
+                ORDER BY published_date DESC
+            """, (ticker, lookback_date))
             
             for row in cursor.fetchall():
                 all_trades.append({
@@ -3917,7 +3795,16 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
     for _, row in alert.trades.iterrows():
         # Handle both Trade Date (corporate) and Traded Date (congressional)
         date_col = "Traded Date" if "Traded Date" in row else "Trade Date"
-        trade_date = row[date_col].strftime('%m/%d/%Y') if pd.notna(row.get(date_col)) else "N/A"
+        date_value = row.get(date_col)
+        
+        # Convert to datetime if string, handle pd.Timestamp or datetime
+        if isinstance(date_value, str):
+            try:
+                date_value = pd.to_datetime(date_value)
+            except:
+                date_value = None
+        
+        trade_date = date_value.strftime('%m/%d/%Y') if pd.notna(date_value) else "N/A"
         name = row['Insider Name']
         
         # Format name for Congressional trades
@@ -4463,14 +4350,15 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         return False
 
 
-def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_activity: Optional[List] = None):
+def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_activity: Optional[List] = None, test_mode: bool = False):
     """
     Process list of alerts: check if new, send emails, update state.
     
     Args:
         alerts: List of InsiderAlert objects
         dry_run: If True, don't send emails or update state
-        tracked_ticker_count: Number of tracked ticker alerts sent separately
+        tracked_ticker_activity: List of tracked ticker activity tuples
+        test_mode: If True, don't mark alerts as sent (for testing)
     """
     if not alerts:
         logger.info("No alerts to process")
@@ -4547,17 +4435,17 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
         send_email_alert(alert, dry_run=dry_run)
         # Mark as sent in database
         if not dry_run:
-            mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)
+            mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type, test_mode=test_mode)
     
     # Send regular signals via email (capped at 3)
     for alert in regular_alerts:
         send_email_alert(alert, dry_run=dry_run)
         # Mark as sent in database
         if not dry_run:
-            mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)
+            mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type, test_mode=test_mode)
 
 
-def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: bool = False):
+def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: bool = False, test_mode: bool = False):
     """
     Run a single check for insider trading alerts.
     
@@ -4565,6 +4453,7 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         since_date: Optional date string (YYYY-MM-DD) to filter trades
         dry_run: If True, don't send emails
         verbose: If True, enable debug logging
+        test_mode: If True, don't mark alerts as sent (for testing without wasting signals)
     """
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
@@ -4611,7 +4500,7 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         alerts = detect_signals(df)
         
         # Process alerts (pass tracked ticker activity for sending with signals)
-        process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity)
+        process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity, test_mode=test_mode)
         
         logger.info("Check completed successfully")
         logger.info("=" * 60)
@@ -4698,6 +4587,11 @@ def main():
         action="store_true",
         help="Enable verbose debug logging"
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Test mode: don't mark alerts as sent (prevents wasting signals)"
+    )
     
     args = parser.parse_args()
     
@@ -4719,7 +4613,8 @@ def main():
             run_once(
                 since_date=args.since,
                 dry_run=args.dry_run,
-                verbose=args.verbose
+                verbose=args.verbose,
+                test_mode=args.test
             )
         else:  # loop
             run_loop(
