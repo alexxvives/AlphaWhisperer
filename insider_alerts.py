@@ -3413,10 +3413,13 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         mentions = []
         for user in tracked_users:
             if user['username']:
+                # Use @username if available
                 mentions.append(f"@{user['username']}")
             else:
-                # Use first name if no username
-                mentions.append(escape_md(user['first_name']))
+                # Use clickable mention with user_id (works even without username)
+                user_id = user['user_id']
+                first_name = user['first_name'] or 'User'
+                mentions.append(f"[{first_name}](tg://user?id={user_id})")
         
         if mentions:
             msg += f"👤 {', '.join(mentions)}\n\n"

@@ -29,10 +29,18 @@ def main():
         logger.info("STARTING DAILY INSIDER ALERTS")
         logger.info("="*60)
         
-        # Import insider_alerts and run main detection
-        import insider_alerts
+        # STEP 1: Check for Telegram messages first (to update tracked tickers)
+        logger.info("Step 1: Checking Telegram for ticker tracking requests...")
+        try:
+            import telegram_tracker_polling
+            telegram_tracker_polling.main()
+            logger.info("Telegram bot processing complete")
+        except Exception as e:
+            logger.warning(f"Telegram bot processing failed: {e}")
         
-        logger.info("Running insider alert detection and sending...")
+        # STEP 2: Run insider alert detection (now includes newly tracked tickers)
+        logger.info("\nStep 2: Running insider alert detection and sending...")
+        import insider_alerts
         insider_alerts.main()
         
         logger.info("="*60)

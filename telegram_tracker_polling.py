@@ -203,6 +203,9 @@ def process_message(message: Dict) -> Optional[str]:
     username = user.get("username", "")
     first_name = user.get("first_name", "")
     
+    # Log user info for debugging
+    logger.info(f"Processing message from user_id={user_id}, username={username}, first_name={first_name}")
+    
     # Check if bot is mentioned
     if "@bot" not in text.lower():
         return None
