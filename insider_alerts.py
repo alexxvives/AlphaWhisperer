@@ -2623,8 +2623,6 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 trades_df = pd.DataFrame(trades_data)
                 
                 signal_type = "Congressional Cluster Buy"
-                if is_bipartisan:
-                    signal_type = "Bipartisan Congressional Cluster"
                 
                 alert = InsiderAlert(
                     signal_type=signal_type,
@@ -4388,16 +4386,126 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     MAX_REGULAR_SIGNALS = 3
     if len(regular_alerts) > MAX_REGULAR_SIGNALS:
         logger.info(f"Capping regular signals from {len(regular_alerts)} to {MAX_REGULAR_SIGNALS}")
-        # Prioritize: Congressional > C-Suite > Cluster > Large Single > Others
-        priority_order = {
-            'High-Conviction Congressional Buy': 1,
-            'Congressional Cluster Buy': 2,
-            'C-Suite Buy': 3,
-            'Cluster Buying': 4,
-            'Large Single Buy': 5,
-            'Strategic Investor Buy': 6
-        }
-        regular_alerts.sort(key=lambda a: priority_order.get(a.signal_type, 99))
+        
+        # Smart prioritization based on signal strength
+        # Score each alert based on multiple factors
+        def calculate_priority_score(alert: InsiderAlert) -> float:
+            """
+            Calculate priority score for signal ranking.
+            Higher score = higher priority (sent first)
+            
+            Scoring factors:
+            1. Signal type base score (stronger signals get higher base)
+            2. Dollar value multiplier (larger purchases = higher priority)
+            3. Number of participants (more insiders/politicians = higher priority)
+            4. Bipartisan bonus for Congressional (both parties = higher priority)
+            """
+            score = 0.0
+            
+            # Base scores by signal type (0-100)
+            base_scores = {
+                'Congressional Cluster Buy': 95,      # Multiple politicians = policy signal
+                'Large Congressional Buy': 90,         # Single politician >$100K = high conviction
+                'C-Suite Buy': 85,                     # CEO/CFO/COO = strongest corporate signal
+                'Cluster Buying': 80,                  # 3+ insiders = coordinated buying
+                'Large Single Buy': 70,                # Single large purchase >$500K
+                'Corporation Purchase': 65,            # Strategic/institutional buying
+                'Strategic Investor Buy': 60           # Corporation buying
+            }
+            score += base_scores.get(alert.signal_type, 50)
+            
+            # Participant multiplier (more participants = stronger signal)
+            if 'num_politicians' in alert.details:
+                # Congressional: 3 politicians = 1.2x, 4 = 1.4x, 5 = 1.6x, 6+ = 1.8x
+                num_pols = alert.details['num_politicians']
+                participant_bonus = min(1.0 + (num_pols - 2) * 0.2, 1.8)
+                score *= participant_bonus
+                
+                # Bipartisan bonus (both parties involved = extra credibility)
+                if alert.details.get('bipartisan'):
+                    score *= 1.15  # 15% bonus for bipartisan agreement
+            
+            elif 'num_insiders' in alert.details:
+                # Corporate insiders: 3 = 1.1x, 4 = 1.2x, 5 = 1.3x, 6+ = 1.4x
+                num_insiders = alert.details['num_insiders']
+                participant_bonus = min(1.0 + (num_insiders - 2) * 0.1, 1.4)
+                score *= participant_bonus
+            
+            # Dollar value multiplier (larger = more conviction)
+            # Uses logarithmic scaling: higher values have diminishing returns
+            # This reflects that $2M isn't twice as significant as $1M
+            import math
+            
+            if 'total_value' in alert.details:
+                # Corporate cluster: log scale from 1.0x ($300K) to ~2.0x ($5M+)
+                total_value = alert.details['total_value']
+                if total_value >= 300_000:
+                    # log10(300K) ≈ 5.48, log10(5M) ≈ 6.70
+                    # Formula: 1.0 + 0.82 * (log10(value) - 5.48)
+                    # Result: $300K=1.0x, $1M=1.4x, $2M=1.7x, $5M=2.0x
+                    log_value = math.log10(total_value)
+                    multiplier = 1.0 + 0.82 * (log_value - 5.48)
+                    score *= min(max(multiplier, 1.0), 2.0)  # Cap between 1.0x-2.0x
+            
+            elif 'value' in alert.details:
+                # Single purchase: log scale from 1.0x ($100K) to ~1.8x ($2M+)
+                value = alert.details['value']
+                if value >= 100_000:
+                    # log10(100K) ≈ 5.0, log10(2M) ≈ 6.30
+                    # Formula: 1.0 + 0.62 * (log10(value) - 5.0)
+                    # Result: $100K=1.0x, $500K=1.43x, $1M=1.62x, $2M=1.8x
+                    log_value = math.log10(value)
+                    multiplier = 1.0 + 0.62 * (log_value - 5.0)
+                    score *= min(max(multiplier, 1.0), 1.8)  # Cap between 1.0x-1.8x
+            
+            # Congressional trades use size ranges (parse midpoint)
+            elif alert.signal_type in ['Congressional Cluster Buy', 'Large Congressional Buy']:
+                # Parse size range from trades (e.g., "100K-250K" -> 175K)
+                # Extract from alert.details if available, or from first trade
+                if not alert.trades.empty and 'Size Range' in alert.trades.columns:
+                    # Get all size ranges and estimate total
+                    import re
+                    total_estimated = 0
+                    for _, row in alert.trades.iterrows():
+                        size_str = row.get('Size Range', '')
+                        if size_str and '-' in size_str:
+                            # Parse "100K-250K" format
+                            parts = size_str.replace('$', '').replace(',', '').split('-')
+                            if len(parts) == 2:
+                                try:
+                                    # Extract numbers and convert K/M to actual values
+                                    low = parts[0].strip()
+                                    high = parts[1].strip()
+                                    
+                                    low_val = float(re.sub(r'[KM]', '', low))
+                                    if 'K' in low:
+                                        low_val *= 1000
+                                    elif 'M' in low:
+                                        low_val *= 1_000_000
+                                    
+                                    high_val = float(re.sub(r'[KM]', '', high))
+                                    if 'K' in high:
+                                        high_val *= 1000
+                                    elif 'M' in high:
+                                        high_val *= 1_000_000
+                                    
+                                    midpoint = (low_val + high_val) / 2
+                                    total_estimated += midpoint
+                                except:
+                                    pass
+                    
+                    if total_estimated >= 50_000:
+                        # Congressional: log scale from 1.0x ($50K) to ~1.6x ($500K+)
+                        # log10(50K) ≈ 4.70, log10(500K) ≈ 5.70
+                        # Formula: 1.0 + 0.6 * (log10(value) - 4.70)
+                        log_value = math.log10(total_estimated)
+                        multiplier = 1.0 + 0.6 * (log_value - 4.70)
+                        score *= min(max(multiplier, 1.0), 1.6)  # Cap between 1.0x-1.6x
+            
+            return score
+        
+        # Sort by priority score (highest first)
+        regular_alerts.sort(key=lambda a: calculate_priority_score(a), reverse=True)
         regular_alerts = regular_alerts[:MAX_REGULAR_SIGNALS]
     
     # Count ALL signals by type for intro message (not just top 3)
