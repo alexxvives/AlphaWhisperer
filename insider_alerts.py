@@ -2600,8 +2600,8 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 
                 # Get individual trades for this ticker cluster
                 trade_query = """
-                    SELECT politician_name, party, chamber, size_range, 
-                           traded_date, published_date, filed_after_days, price
+                    SELECT politician_name, politician_id, party, chamber, size_range, 
+                           traded_date, published_date, filed_after_days, price, company_name, issuer_id
                     FROM congressional_trades
                     WHERE ticker = ?
                     AND trade_type = "BUY"
@@ -2610,6 +2610,15 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 """
                 trade_cursor = conn.execute(trade_query, (ticker,))
                 trades = trade_cursor.fetchall()
+                
+                # Get company_name from first trade
+                company_name_from_db = trades[0]['company_name'] if trades and trades[0]['company_name'] else ticker
+                
+                # Get first issuer_id for linking (may not exist in older records)
+                try:
+                    first_issuer_id = trades[0]['issuer_id'] if trades else None
+                except (KeyError, IndexError):
+                    first_issuer_id = None
                 
                 # Build DataFrame for display
                 trades_data = []
@@ -2621,6 +2630,7 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                     trades_data.append({
                         "Ticker": ticker,
                         "Insider Name": f"{trade['politician_name']} ({trade['party']})",
+                        "Politician ID": trade['politician_id'],
                         "Title": trade['chamber'] or 'Congress',
                         "Trade Date": trade_date,
                         "Published Date": published_date,
@@ -2635,12 +2645,13 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 alert = InsiderAlert(
                     signal_type=signal_type,
                     ticker=ticker,
-                    company_name=ticker,  # Will be fetched later
+                    company_name=company_name_from_db,
                     trades=trades_df,
                     details={
                         "num_politicians": num_politicians,
                         "politicians": politicians[:5],
-                        "bipartisan": is_bipartisan
+                        "bipartisan": is_bipartisan,
+                        "issuer_id": first_issuer_id
                     }
                 )
                 alerts.append(alert)
@@ -2673,7 +2684,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
             query = """
                 SELECT politician_name, politician_id, party, chamber, state,
                        ticker, company_name, size_range, price,
-                       traded_date, published_date, filed_after_days
+                       traded_date, published_date, filed_after_days, issuer_id
                 FROM congressional_trades
                 WHERE trade_type = "BUY"
                 AND published_date >= date("now", "-7 days")
@@ -2698,6 +2709,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                 trades_data = [{
                     "Ticker": ticker,
                     "Insider Name": politician,
+                    "Politician ID": trade['politician_id'],
                     "Title": f"{trade['chamber'] or 'Congress'} - {trade['state']}",
                     "Trade Date": trade_date,
                     "Published Date": published_date,
@@ -2707,6 +2719,12 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                 }]
                 trades_df = pd.DataFrame(trades_data)
                 
+                # Get issuer_id safely (may not exist in older records)
+                try:
+                    issuer_id_val = trade['issuer_id']
+                except (KeyError, IndexError):
+                    issuer_id_val = None
+                
                 alert = InsiderAlert(
                     signal_type="Large Congressional Buy",
                     ticker=ticker,
@@ -2714,9 +2732,11 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                     trades=trades_df,
                     details={
                         "politician": trade['politician_name'],
+                        "politician_id": trade['politician_id'],
                         "party": trade['party'],
                         "size": trade['size_range'],
-                        "published_date": trade['published_date']
+                        "published_date": trade['published_date'],
+                        "issuer_id": issuer_id_val
                     }
                 )
                 alerts.append(alert)
@@ -3376,23 +3396,24 @@ def format_email_html(alert: InsiderAlert) -> str:
                     politician_ids.append(pid)
         
         if politician_ids:
-            # Build link with ticker and all politician IDs
+            # Build link with all politician IDs (Capitol Trades doesn't filter by ticker param)
             pol_params = '&'.join([f"politician={pid}" for pid in politician_ids])
-            link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}&{pol_params}"
+            link_url = f"https://www.capitoltrades.com/trades?{pol_params}"
         else:
-            # Fallback to ticker-based link
-            link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}"
+            # Fallback - just show all trades
+            link_url = f"https://www.capitoltrades.com/trades"
         link_text = "View on Capitol Trades →"
     else:
-        # OpenInsider link with date range filter for better specificity
+        # OpenInsider link with full screener format and date range filter
         if not alert.trades.empty and "Trade Date" in alert.trades.columns:
             trade_dates = alert.trades["Trade Date"].dropna().tolist()
             if trade_dates:
                 try:
                     min_date = pd.to_datetime(min(trade_dates))
                     max_date = pd.to_datetime(max(trade_dates))
-                    date_range = f"{min_date.strftime('%m/%d/%Y')}+-+{max_date.strftime('%m/%d/%Y')}"
-                    link_url = f"http://openinsider.com/screener?s={alert.ticker}&fd=-1&fdr={date_range}&xp=1&xs=1"
+                    # Use URL-encoded format: %2F for /
+                    date_range = f"{min_date.strftime('%m')}%2F{min_date.strftime('%d')}%2F{min_date.strftime('%Y')}+-+{max_date.strftime('%m')}%2F{max_date.strftime('%d')}%2F{max_date.strftime('%Y')}"
+                    link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
                 except:
                     link_url = f"http://openinsider.com/screener?s={alert.ticker}"
             else:
@@ -3519,7 +3540,7 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
             # Check Congressional trades (last 7 days by published_date)
             cursor.execute("""
                 SELECT ticker, company_name, politician_name, party, trade_type,
-                       traded_date, published_date, size_range, price, politician_id
+                       traded_date, published_date, size_range, price, politician_id, issuer_id
                 FROM congressional_trades
                 WHERE ticker = ? AND published_date >= ?
                 ORDER BY published_date DESC
@@ -3538,7 +3559,8 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
                     'published_date': row[6],
                     'size_range': row[7],
                     'price': row[8],
-                    'politician_id': row[9]
+                    'politician_id': row[9],
+                    'issuer_id': row[10]
                 })
             
             if all_trades:
@@ -3761,23 +3783,24 @@ def format_telegram_message(alert: InsiderAlert) -> str:
                     politician_ids.append(pid)
         
         if politician_ids:
-            # Build link with ticker and all politician IDs
+            # Build link with all politician IDs (Capitol Trades doesn't filter by ticker param)
             pol_params = '&'.join([f"politician={pid}" for pid in politician_ids])
-            link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}&{pol_params}"
+            link_url = f"https://www.capitoltrades.com/trades?{pol_params}"
         else:
-            # Fallback to ticker-based link
-            link_url = f"https://www.capitoltrades.com/trades?ticker={alert.ticker}"
+            # Fallback - just show all trades
+            link_url = f"https://www.capitoltrades.com/trades"
         msg += f"\n🔗 [View on Capitol Trades]({escape_md(link_url)})"
     else:
-        # OpenInsider link with date range filter for better specificity
+        # OpenInsider link with full screener format and date range filter
         if not alert.trades.empty and "Trade Date" in alert.trades.columns:
             trade_dates = alert.trades["Trade Date"].dropna().tolist()
             if trade_dates:
                 try:
                     min_date = pd.to_datetime(min(trade_dates))
                     max_date = pd.to_datetime(max(trade_dates))
-                    date_range = f"{min_date.strftime('%m/%d/%Y')}+-+{max_date.strftime('%m/%d/%Y')}"
-                    link_url = f"http://openinsider.com/screener?s={alert.ticker}&fd=-1&fdr={date_range}&xp=1&xs=1"
+                    # Use URL-encoded format: %2F for /
+                    date_range = f"{min_date.strftime('%m')}%2F{min_date.strftime('%d')}%2F{min_date.strftime('%Y')}+-+{max_date.strftime('%m')}%2F{max_date.strftime('%d')}%2F{max_date.strftime('%Y')}"
+                    link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
                 except:
                     link_url = f"http://openinsider.com/screener?s={alert.ticker}"
             else:
@@ -4291,18 +4314,18 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
         msg += "\n"
         links = []
         if has_congressional:
-            # Build Capitol Trades link with all politician IDs
+            # Build Capitol Trades link with all politician IDs (no ticker param - doesn't work)
             congressional_trades = [t for t in sorted_trades if t.get('source') == 'Congressional']
             politician_ids = list(set(t.get('politician_id') for t in congressional_trades if t.get('politician_id')))
             if politician_ids:
                 pol_params = '&'.join([f"politician={pid}" for pid in politician_ids])
-                capitol_link = f"https://www.capitoltrades.com/trades?ticker={ticker}&{pol_params}"
+                capitol_link = f"https://www.capitoltrades.com/trades?{pol_params}"
             else:
-                capitol_link = f"https://www.capitoltrades.com/trades?ticker={ticker}"
+                capitol_link = f"https://www.capitoltrades.com/trades"
             capitol_link_esc = escape_md(capitol_link)
             links.append(f"[View on Capitol Trades]({capitol_link_esc})")
         if has_openinsider:
-            # Build OpenInsider link with date range for better filtering
+            # Build OpenInsider link with full screener format and date range
             oi_trades = [t for t in sorted_trades if t.get('source') == 'OpenInsider']
             if oi_trades:
                 # Get date range from trades
@@ -4310,12 +4333,12 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
                 if trade_dates:
                     min_date = min(trade_dates)
                     max_date = max(trade_dates)
-                    # Format dates as MM/DD/YYYY for OpenInsider
+                    # Format dates with URL encoding
                     try:
                         min_dt = pd.to_datetime(min_date)
                         max_dt = pd.to_datetime(max_date)
-                        date_range = f"{min_dt.strftime('%m/%d/%Y')}+-+{max_dt.strftime('%m/%d/%Y')}"
-                        oi_link = f"http://openinsider.com/screener?s={ticker}&fd=-1&fdr={date_range}&xp=1&xs=1"
+                        date_range = f"{min_dt.strftime('%m')}%2F{min_dt.strftime('%d')}%2F{min_dt.strftime('%Y')}+-+{max_dt.strftime('%m')}%2F{max_dt.strftime('%d')}%2F{max_dt.strftime('%Y')}"
+                        oi_link = f"http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
                     except:
                         oi_link = f"http://openinsider.com/screener?s={ticker}"
                 else:
