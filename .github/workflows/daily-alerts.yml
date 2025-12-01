@@ -63,6 +63,14 @@ jobs:
         with:
           chrome-version: stable
 
+      - name: Install and start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 5
+          ollama pull llama3.2:1b
+          echo "Ollama ready with llama3.2:1b model"
+
       - name: Initialize database if not exists
         run: |
           python -c "import insider_alerts; insider_alerts.init_database()"

@@ -226,13 +226,10 @@ def init_database():
         try:
             cursor = conn.execute("PRAGMA table_info(congressional_trades)")
             columns = [row[1] for row in cursor.fetchall()]
-            logger.info(f"Congressional trades table columns: {columns}")
             if 'issuer_id' not in columns:
                 conn.execute("ALTER TABLE congressional_trades ADD COLUMN issuer_id TEXT")
                 conn.commit()  # Ensure migration is committed immediately
                 logger.info("Schema migration: Added issuer_id column to congressional_trades")
-            else:
-                logger.debug("Schema check: issuer_id column already exists")
         except Exception as e:
             logger.error(f"Schema migration failed: {e}", exc_info=True)
         
@@ -517,7 +514,7 @@ def get_company_context(ticker: str) -> Dict[str, any]:
         except Exception as e:
             logger.warning(f"Could not fetch price history for {ticker}: {e}")
         
-        logger.info(f"Fetched company info for {ticker}")
+        logger.debug(f"Fetched company info for {ticker}")
         
     except Exception as e:
         logger.warning(f"Could not fetch company info for {ticker}: {e}")
@@ -614,19 +611,12 @@ def get_congressional_trades(ticker: str = None) -> List[Dict]:
     
     # Data is now scraped explicitly in run_once() at the same time as OpenInsider
     # This function just queries the database
-    last_scrape = get_last_scrape_time()
-    if last_scrape:
-        logger.info(f"Using Congressional trades (last updated: {last_scrape})")
-    else:
-        logger.warning("No Congressional trades found in database")
     
     # Query database for ticker-specific trades
     if ticker:
         trades = get_ticker_trades_from_db(ticker, limit=50)
         if trades:
-            logger.info(f"Found {len(trades)} Congressional trades for {ticker} in database")
-        else:
-            logger.info(f"No Congressional trades found for {ticker}")
+            logger.debug(f"Found {len(trades)} Congressional trades for {ticker} in database")
         return trades
     else:
         # Return recent trades across all tickers
@@ -4682,8 +4672,7 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     
     # Count ALL signals by type for intro message (not just top 3)
     signal_counts = {}
-    all_detected_alerts = [alert for alert, _ in tracked_alerts] + new_alerts  # Use new_alerts (all detected) instead of regular_alerts (capped)
-    logger.info(f"All detected alert types: {[a.signal_type for a in all_detected_alerts]}")
+    all_detected_alerts = [alert for alert, _ in tracked_alerts] + new_alerts
     for alert in all_detected_alerts:
         signal_type = alert.signal_type
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
@@ -4714,9 +4703,6 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
     if tracked_ticker_count > 0:
         signal_counts['Tracked Tickers'] = tracked_ticker_count
-    
-    # Log signal counts for debugging
-    logger.info(f"Signal counts for intro: {signal_counts}")
     
     # Send intro message to Telegram if there are signals to send
     if USE_TELEGRAM and (tracked_ticker_count > 0 or tracked_alerts or regular_alerts) and not dry_run:
