@@ -192,7 +192,7 @@ def get_db():
 def init_database():
     """
     Initialize SQLite database with schema for Congressional and OpenInsider trades.
-    Creates tables if they don't exist.
+    Creates tables if they don't exist, and handles schema migrations.
     
     Note: 
     - tracked_tickers table is managed by telegram_tracker_polling.py
@@ -221,6 +221,16 @@ def init_database():
                 UNIQUE(politician_name, ticker, traded_date, trade_type, published_date)
             )
         """)
+        
+        # Schema migration: Add issuer_id column if it doesn't exist (for older databases)
+        try:
+            cursor = conn.execute("PRAGMA table_info(congressional_trades)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'issuer_id' not in columns:
+                conn.execute("ALTER TABLE congressional_trades ADD COLUMN issuer_id TEXT")
+                logger.info("Schema migration: Added issuer_id column to congressional_trades")
+        except Exception as e:
+            logger.warning(f"Schema migration check failed: {e}")
         
         # Create indices for faster queries
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON congressional_trades(ticker)")
