@@ -4647,6 +4647,33 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
                         multiplier = 1.0 + 0.6 * (log_value - 4.70)
                         score *= min(max(multiplier, 1.0), 1.6)  # Cap between 1.0x-1.6x
             
+            # Recency bonus: More recent trades get higher priority
+            # Trades from today = 1.3x, 1 day ago = 1.25x, 7 days ago = 1.0x, 14+ days = 0.8x
+            try:
+                from datetime import datetime, timedelta
+                trade_date = None
+                
+                # Try to get trade date from DataFrame
+                if not alert.trades.empty:
+                    if 'Trade Date' in alert.trades.columns:
+                        trade_date = alert.trades['Trade Date'].max()
+                    elif 'Published Date' in alert.trades.columns:
+                        trade_date = alert.trades['Published Date'].max()
+                
+                if trade_date is not None and pd.notna(trade_date):
+                    # Convert to datetime if needed
+                    if isinstance(trade_date, str):
+                        trade_date = pd.to_datetime(trade_date)
+                    
+                    days_ago = (datetime.now() - trade_date.to_pydatetime().replace(tzinfo=None)).days
+                    
+                    # Recency multiplier: exponential decay from 1.3x (today) to 0.8x (14+ days)
+                    # Formula: 1.3 - 0.036 * days_ago, capped at 0.8 minimum
+                    recency_multiplier = max(1.3 - 0.036 * days_ago, 0.8)
+                    score *= recency_multiplier
+            except Exception:
+                pass  # If we can't determine recency, don't modify score
+            
             return score
         
         # Sort by priority score (highest first)
