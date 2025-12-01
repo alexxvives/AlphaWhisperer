@@ -659,7 +659,6 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
         days: Number of days to look back (30, 90, 365, or None for ALL TIME - 3 YEARS filter)
         max_pages: Maximum number of pages to scrape (default 500 to handle all historical data)
     """
-    logger.info(f"=== ENTERING scrape_all_congressional_trades_to_db (days={days}, max_pages={max_pages}) ===")
     driver = None
     new_trades_count = 0
     duplicate_count = 0
@@ -668,8 +667,8 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
     
     # Calculate cutoff date for 30-day window
     from datetime import datetime, timedelta
+    import re  # Need re for regex patterns
     cutoff_date = datetime.now() - timedelta(days=30)
-    logger.info(f"Filtering Congressional trades published after: {cutoff_date.strftime('%Y-%m-%d')}")
     
     try:
         from selenium import webdriver
@@ -690,17 +689,13 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
         chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         
-        logger.info(f"Starting bulk scrape of Congressional trades (last {days} days)...")
-        logger.info(f"Initializing ChromeDriver via webdriver-manager...")
+        logger.info(f"Starting bulk scrape of Congressional trades...")
         service = Service(ChromeDriverManager().install())
-        logger.info(f"ChromeDriver service created, launching browser...")
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(20)
-        logger.info(f"Chrome browser launched successfully")
         
         # Navigate to trades page with pageSize parameter
         url = "https://www.capitoltrades.com/trades?pageSize=96"
-        logger.info(f"Loading: {url}")
         driver.get(url)
         time.sleep(4)
         
@@ -725,17 +720,8 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
             page_source = driver.page_source
             soup = BeautifulSoup(page_source, 'html.parser')
             
-            # Debug: Log page title and check for common issues
-            title = soup.find('title')
-            logger.info(f"Page title: {title.get_text() if title else 'No title'}")
-            
             # Find all table rows
             all_rows = soup.find_all('tr')
-            logger.info(f"Found {len(all_rows)} table rows on page")
-            
-            # Debug: If no rows, log first 500 chars of page
-            if len(all_rows) == 0:
-                logger.warning(f"No table rows found. Page source preview: {page_source[:1000]}")
             
             page_trades = 0
             page_dupes = 0
@@ -753,6 +739,8 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     politician_name = politician_link.get_text(strip=True)
                     politician_href = politician_link.get('href', '')
                     politician_id = politician_href.split('/')[-1] if politician_href else None
+                    
+                    # Processing row for politician
                     
                     # Get row text for parsing
                     row_text = row.get_text()
@@ -835,7 +823,39 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                         cell_text = cell.get_text(strip=True)
                         cell_lower = cell_text.lower()
                         
-                        # Match published date - if it contains time (HH:MM), check for today/yesterday
+                        # Find all dates in this cell (format: "27 Nov2025" or "27 Nov 2025")
+                        all_date_matches = re.findall(r'(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(20\d{2})', cell_text)
+                        
+                        if len(all_date_matches) >= 2:
+                            # Two dates in same cell - first is published, second is traded
+                            if not published_date:
+                                try:
+                                    day1, month1, year1 = all_date_matches[0]
+                                    date_obj1 = datetime.strptime(f"{day1} {month1} {year1}", "%d %b %Y")
+                                    published_date = date_obj1.strftime("%Y-%m-%d")
+                                except:
+                                    pass
+                            if not traded_date:
+                                try:
+                                    day2, month2, year2 = all_date_matches[1]
+                                    date_obj2 = datetime.strptime(f"{day2} {month2} {year2}", "%d %b %Y")
+                                    traded_date = date_obj2.strftime("%Y-%m-%d")
+                                except:
+                                    pass
+                        elif len(all_date_matches) == 1:
+                            # Single date in cell - assign to published first, then traded
+                            try:
+                                day, month, year = all_date_matches[0]
+                                date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
+                                date_str = date_obj.strftime("%Y-%m-%d")
+                                if not published_date:
+                                    published_date = date_str
+                                elif not traded_date:
+                                    traded_date = date_str
+                            except:
+                                pass
+                        
+                        # Match published date with time (today/yesterday) - for recently filed
                         if not published_date:
                             time_match = re.search(r'\d{1,2}:\d{2}', cell_text)
                             if time_match:
@@ -845,37 +865,6 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                                 else:
                                     # Default to today if time is present (either says "today" or just time)
                                     published_date = today.strftime("%Y-%m-%d")
-                            elif any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                                                                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                                # Extract date and year - format can be "2 Nov2025" or "2 Nov 2025"
-                                match = re.search(r'(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(20\d{2})?', cell_text)
-                                if match:
-                                    day = match.group(1)
-                                    month = match.group(2)
-                                    year = match.group(3) if match.group(3) else str(current_year)
-                                    # Convert to YYYY-MM-DD format
-                                    try:
-                                        date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
-                                        published_date = date_obj.strftime("%Y-%m-%d")
-                                    except:
-                                        pass
-                        
-                        # Match traded date (second date found)
-                        elif not traded_date:
-                            if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                                                                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                                # Extract date and year - format can be "2 Nov2025" or "2 Nov 2025"
-                                match = re.search(r'(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(20\d{2})?', cell_text)
-                                if match:
-                                    day = match.group(1)
-                                    month = match.group(2)
-                                    year = match.group(3) if match.group(3) else str(current_year)
-                                    # Convert to YYYY-MM-DD format
-                                    try:
-                                        date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
-                                        traded_date = date_obj.strftime("%Y-%m-%d")
-                                    except:
-                                        pass
                         
                         # Match "Filed After" days - look in q-value span
                         if not filed_after_days:
@@ -949,7 +938,7 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     logger.debug(f"Could not parse row: {e}")
                     continue
             
-            logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates (rows with politician links: {rows_with_politician_link})")
+            logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates")
             
             # Commit database every 10 pages to prevent data loss on timeout
             if total_pages % 10 == 0:
