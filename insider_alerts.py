@@ -98,8 +98,8 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 
 # OpenInsider URLs
 OPENINSIDER_URL = "http://openinsider.com/latest-insider-trading"
-# Screener URL for last 7 days of trades (fd=7 means filed in last 7 days)
-OPENINSIDER_LAST_WEEK_URL = "http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=7&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=1000&page={page}"
+# Screener URL for last 30 days of trades (fd=30 means filed in last 30 days)
+OPENINSIDER_LAST_WEEK_URL = "http://openinsider.com/screener?s=&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=1000&page={page}"
 # Stop scraping if we see this many consecutive duplicates
 DUPLICATE_THRESHOLD = 50
 
@@ -973,35 +973,21 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                 logger.info(f"Reached max pages limit ({max_pages})")
                 break
             
-            # Check if there's a next page button
+            # Navigate to next page using URL (more reliable than clicking)
             try:
-                # Scroll to bottom to ensure pagination is visible
-                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-                time.sleep(1)
+                next_page = total_pages + 1
+                next_url = f"https://www.capitoltrades.com/trades?pageSize=96&page={next_page}"
+                logger.info(f"Navigating to page {next_page}...")
+                driver.get(next_url)
                 
-                # Find the "Go to next page" link by aria-label
-                next_link = driver.find_element(By.CSS_SELECTOR, 'a[aria-label="Go to next page"]')
-                
-                if next_link and not next_link.get_attribute('disabled'):
-                    # Use JavaScript click to avoid cookie banner interception
-                    driver.execute_script("arguments[0].click();", next_link)
-                    logger.info("Navigating to next page...")
-                    
-                    # Wait for page to actually load (wait for table to be stale and reload)
-                    try:
-                        WebDriverWait(driver, 20).until(
-                            EC.staleness_of(driver.find_element(By.TAG_NAME, "table"))
-                        )
-                        # Wait for new table to appear
-                        WebDriverWait(driver, 20).until(
-                            EC.presence_of_element_located((By.TAG_NAME, "table"))
-                        )
-                        time.sleep(3)  # Extra wait for JavaScript to finish
-                    except Exception as e:
-                        logger.warning(f"Timeout waiting for next page to load: {e}")
-                        break
-                else:
-                    logger.info("No more pages to scrape")
+                # Wait for table to load
+                try:
+                    WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located((By.TAG_NAME, "table"))
+                    )
+                    time.sleep(2)  # Extra wait for JavaScript to finish
+                except Exception as e:
+                    logger.warning(f"Timeout waiting for page {next_page} to load: {e}")
                     break
                     
             except Exception as e:
@@ -2012,7 +1998,7 @@ def fetch_openinsider_last_week() -> pd.DataFrame:
     Returns:
         DataFrame of all new trades from last week
     """
-    logger.info("Fetching OpenInsider trades from last 7 days (paginated screener)")
+    logger.info("Fetching OpenInsider trades from last 30 days (paginated screener)")
     
     all_trades = []
     page = 1
