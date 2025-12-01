@@ -725,10 +725,21 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
             page_source = driver.page_source
             soup = BeautifulSoup(page_source, 'html.parser')
             
+            # Debug: Log page title and check for common issues
+            title = soup.find('title')
+            logger.info(f"Page title: {title.get_text() if title else 'No title'}")
+            
             # Find all table rows
             all_rows = soup.find_all('tr')
+            logger.info(f"Found {len(all_rows)} table rows on page")
+            
+            # Debug: If no rows, log first 500 chars of page
+            if len(all_rows) == 0:
+                logger.warning(f"No table rows found. Page source preview: {page_source[:1000]}")
+            
             page_trades = 0
             page_dupes = 0
+            rows_with_politician_link = 0
             
             for row in all_rows:
                 try:
@@ -736,6 +747,8 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     politician_link = row.find('a', href=lambda x: x and '/politicians/' in str(x))
                     if not politician_link:
                         continue
+                    
+                    rows_with_politician_link += 1
                     
                     politician_name = politician_link.get_text(strip=True)
                     politician_href = politician_link.get('href', '')
@@ -936,7 +949,7 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     logger.debug(f"Could not parse row: {e}")
                     continue
             
-            logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates")
+            logger.info(f"  Page {total_pages}: {page_trades} new, {page_dupes} duplicates (rows with politician links: {rows_with_politician_link})")
             
             # Commit database every 10 pages to prevent data loss on timeout
             if total_pages % 10 == 0:
