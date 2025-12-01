@@ -686,12 +686,22 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
         logger.info(f"Starting bulk scrape of Congressional trades...")
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(20)
+        driver.set_page_load_timeout(30)
         
         # Navigate to trades page with pageSize parameter
         url = "https://www.capitoltrades.com/trades?pageSize=96"
         driver.get(url)
-        time.sleep(4)
+        
+        # Wait for data rows to load (not just page skeleton)
+        try:
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/politicians/']"))
+            )
+            time.sleep(2)  # Extra wait for all rows to render
+            logger.info("Initial page data loaded")
+        except Exception as e:
+            logger.warning(f"Timeout waiting for initial page data: {e}")
+            time.sleep(5)  # Fallback wait
         
         # Dismiss cookie banner if present
         try:
@@ -716,6 +726,10 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
             
             # Find all table rows
             all_rows = soup.find_all('tr')
+            
+            # Quick check: how many rows have politician links?
+            politician_rows = [r for r in all_rows if r.find('a', href=lambda x: x and '/politicians/' in str(x))]
+            logger.debug(f"Page {total_pages}: Found {len(all_rows)} total rows, {len(politician_rows)} with politician links")
             
             page_trades = 0
             page_dupes = 0
@@ -953,9 +967,11 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
             else:
                 consecutive_duplicate_pages = 0  # Reset counter if we found new trades
             
-            # Stop early if we got zero trades on this page (means we're past the data)
+            # Stop early if we got zero trades on this page (means we're past the data or page didn't load)
             if page_trades == 0 and page_dupes == 0:
-                logger.info("No trades found on this page - reached end of data")
+                logger.info(f"No trades found on page {total_pages} (rows_with_politician_link={rows_with_politician_link}, politician_rows={len(politician_rows)})")
+                if rows_with_politician_link == 0:
+                    logger.warning("Page may not have loaded properly - no politician links found")
                 break
             
             # Stop if we hit max pages
@@ -970,15 +986,19 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                 logger.info(f"Navigating to page {next_page}...")
                 driver.get(next_url)
                 
-                # Wait for table to load
+                # Wait for data rows to load (not just table skeleton)
+                # Capitol Trades loads data via JavaScript, so table exists immediately
+                # but rows with politician links are loaded asynchronously
                 try:
-                    WebDriverWait(driver, 15).until(
-                        EC.presence_of_element_located((By.TAG_NAME, "table"))
+                    # Wait for at least one politician link to appear (indicates data loaded)
+                    WebDriverWait(driver, 20).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "a[href*='/politicians/']"))
                     )
-                    time.sleep(2)  # Extra wait for JavaScript to finish
+                    time.sleep(2)  # Extra wait for all rows to render
                 except Exception as e:
-                    logger.warning(f"Timeout waiting for page {next_page} to load: {e}")
-                    break
+                    logger.warning(f"Timeout waiting for page {next_page} data to load: {e}")
+                    # Try one more time with longer wait
+                    time.sleep(5)
                     
             except Exception as e:
                 logger.info(f"Reached last page or pagination error: {e}")
