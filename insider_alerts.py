@@ -4695,6 +4695,21 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
         if 'Large Congressional Buy' not in signal_counts:
             signal_counts['Large Congressional Buy'] = 0
     
+    # Always include all signal types in the summary (even if 0)
+    all_signal_types = [
+        'Congressional Cluster Buy',
+        'Large Congressional Buy', 
+        'C-Suite Buy',
+        'Cluster Buying',
+        'Large Single Buy',
+        'Bearish Cluster Selling',
+        'Corporation Purchase',
+        'Strategic Investor Buy'
+    ]
+    for sig_type in all_signal_types:
+        if sig_type not in signal_counts:
+            signal_counts[sig_type] = 0
+    
     # Add tracked ticker count if provided
     tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
     if tracked_ticker_count > 0:
