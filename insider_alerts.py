@@ -989,14 +989,14 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     
                     # Wait for page to actually load (wait for table to be stale and reload)
                     try:
-                        WebDriverWait(driver, 10).until(
+                        WebDriverWait(driver, 20).until(
                             EC.staleness_of(driver.find_element(By.TAG_NAME, "table"))
                         )
                         # Wait for new table to appear
-                        WebDriverWait(driver, 10).until(
+                        WebDriverWait(driver, 20).until(
                             EC.presence_of_element_located((By.TAG_NAME, "table"))
                         )
-                        time.sleep(2)
+                        time.sleep(3)  # Extra wait for JavaScript to finish
                     except Exception as e:
                         logger.warning(f"Timeout waiting for next page to load: {e}")
                         break
@@ -4671,6 +4671,7 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     # Count ALL signals by type for intro message (not just top 3)
     signal_counts = {}
     all_detected_alerts = [alert for alert, _ in tracked_alerts] + new_alerts  # Use new_alerts (all detected) instead of regular_alerts (capped)
+    logger.info(f"All detected alert types: {[a.signal_type for a in all_detected_alerts]}")
     for alert in all_detected_alerts:
         signal_type = alert.signal_type
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
@@ -4679,6 +4680,9 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
     if tracked_ticker_count > 0:
         signal_counts['Tracked Tickers'] = tracked_ticker_count
+    
+    # Log signal counts for debugging
+    logger.info(f"Signal counts for intro: {signal_counts}")
     
     # Send intro message to Telegram if there are signals to send
     if USE_TELEGRAM and (tracked_ticker_count > 0 or tracked_alerts or regular_alerts) and not dry_run:
