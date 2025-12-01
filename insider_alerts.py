@@ -226,11 +226,15 @@ def init_database():
         try:
             cursor = conn.execute("PRAGMA table_info(congressional_trades)")
             columns = [row[1] for row in cursor.fetchall()]
+            logger.info(f"Congressional trades table columns: {columns}")
             if 'issuer_id' not in columns:
                 conn.execute("ALTER TABLE congressional_trades ADD COLUMN issuer_id TEXT")
+                conn.commit()  # Ensure migration is committed immediately
                 logger.info("Schema migration: Added issuer_id column to congressional_trades")
+            else:
+                logger.debug("Schema check: issuer_id column already exists")
         except Exception as e:
-            logger.warning(f"Schema migration check failed: {e}")
+            logger.error(f"Schema migration failed: {e}", exc_info=True)
         
         # Create indices for faster queries
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticker ON congressional_trades(ticker)")
@@ -2604,15 +2608,31 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 is_bipartisan = has_dem and has_rep
                 
                 # Get individual trades for this ticker cluster
-                trade_query = """
-                    SELECT politician_name, politician_id, party, chamber, size_range, 
-                           traded_date, published_date, filed_after_days, price, company_name, issuer_id
-                    FROM congressional_trades
-                    WHERE ticker = ?
-                    AND trade_type = "BUY"
-                    AND published_date >= date("now", "-30 days")
-                    ORDER BY published_date DESC
-                """
+                # Check if issuer_id column exists (for backward compatibility)
+                cursor_info = conn.execute("PRAGMA table_info(congressional_trades)")
+                columns = [row[1] for row in cursor_info.fetchall()]
+                has_issuer_id = 'issuer_id' in columns
+                
+                if has_issuer_id:
+                    trade_query = """
+                        SELECT politician_name, politician_id, party, chamber, size_range, 
+                               traded_date, published_date, filed_after_days, price, company_name, issuer_id
+                        FROM congressional_trades
+                        WHERE ticker = ?
+                        AND trade_type = "BUY"
+                        AND published_date >= date("now", "-30 days")
+                        ORDER BY published_date DESC
+                    """
+                else:
+                    trade_query = """
+                        SELECT politician_name, politician_id, party, chamber, size_range, 
+                               traded_date, published_date, filed_after_days, price, company_name
+                        FROM congressional_trades
+                        WHERE ticker = ?
+                        AND trade_type = "BUY"
+                        AND published_date >= date("now", "-30 days")
+                        ORDER BY published_date DESC
+                    """
                 trade_cursor = conn.execute(trade_query, (ticker,))
                 trades = trade_cursor.fetchall()
                 
@@ -2620,10 +2640,12 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 company_name_from_db = trades[0]['company_name'] if trades and trades[0]['company_name'] else ticker
                 
                 # Get first issuer_id for linking (may not exist in older records)
-                try:
-                    first_issuer_id = trades[0]['issuer_id'] if trades else None
-                except (KeyError, IndexError):
-                    first_issuer_id = None
+                first_issuer_id = None
+                if has_issuer_id and trades:
+                    try:
+                        first_issuer_id = trades[0]['issuer_id']
+                    except (KeyError, IndexError):
+                        pass
                 
                 # Build DataFrame for display
                 trades_data = []
@@ -2686,19 +2708,39 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
     try:
         # Query database for large buys (last 7 days by published_date, size ≥$100K)
         with get_db() as conn:
-            query = """
-                SELECT politician_name, politician_id, party, chamber, state,
-                       ticker, company_name, size_range, price,
-                       traded_date, published_date, filed_after_days, issuer_id
-                FROM congressional_trades
-                WHERE trade_type = "BUY"
-                AND published_date >= date("now", "-7 days")
-                AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' 
-                     OR size_range LIKE '%500K%' OR size_range LIKE '%1M%' 
-                     OR size_range LIKE '%5M%' OR size_range LIKE '%25M%'
-                     OR size_range LIKE '>%')
-                ORDER BY published_date DESC
-            """
+            # Check if issuer_id column exists (for backward compatibility)
+            cursor_info = conn.execute("PRAGMA table_info(congressional_trades)")
+            columns = [row[1] for row in cursor_info.fetchall()]
+            has_issuer_id = 'issuer_id' in columns
+            
+            if has_issuer_id:
+                query = """
+                    SELECT politician_name, politician_id, party, chamber, state,
+                           ticker, company_name, size_range, price,
+                           traded_date, published_date, filed_after_days, issuer_id
+                    FROM congressional_trades
+                    WHERE trade_type = "BUY"
+                    AND published_date >= date("now", "-7 days")
+                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' 
+                         OR size_range LIKE '%500K%' OR size_range LIKE '%1M%' 
+                         OR size_range LIKE '%5M%' OR size_range LIKE '%25M%'
+                         OR size_range LIKE '>%')
+                    ORDER BY published_date DESC
+                """
+            else:
+                query = """
+                    SELECT politician_name, politician_id, party, chamber, state,
+                           ticker, company_name, size_range, price,
+                           traded_date, published_date, filed_after_days
+                    FROM congressional_trades
+                    WHERE trade_type = "BUY"
+                    AND published_date >= date("now", "-7 days")
+                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' 
+                         OR size_range LIKE '%500K%' OR size_range LIKE '%1M%' 
+                         OR size_range LIKE '%5M%' OR size_range LIKE '%25M%'
+                         OR size_range LIKE '>%')
+                    ORDER BY published_date DESC
+                """
             cursor = conn.execute(query)
             large_buys = cursor.fetchall()
             
@@ -2725,10 +2767,12 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                 trades_df = pd.DataFrame(trades_data)
                 
                 # Get issuer_id safely (may not exist in older records)
-                try:
-                    issuer_id_val = trade['issuer_id']
-                except (KeyError, IndexError):
-                    issuer_id_val = None
+                issuer_id_val = None
+                if has_issuer_id:
+                    try:
+                        issuer_id_val = trade['issuer_id']
+                    except (KeyError, IndexError):
+                        pass
                 
                 alert = InsiderAlert(
                     signal_type="Large Congressional Buy",
