@@ -4059,10 +4059,9 @@ def send_telegram_intro(signal_counts: dict, dry_run: bool = False) -> bool:
         intro_text = random.choice(intros)
         intro_text += "\n\n"
         
-        # Add signal counts
+        # Add signal counts (show all, including 0 for Congressional signals)
         for signal_type, count in signal_counts.items():
-            if count > 0:
-                intro_text += f"• {signal_type}: {count}\n"
+            intro_text += f"• {signal_type}: {count}\n"
         
         # Escape markdown special characters
         def escape_md(text):
@@ -4675,6 +4674,13 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     for alert in all_detected_alerts:
         signal_type = alert.signal_type
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
+    
+    # Always include Congressional signals in the count (even if 0) when Capitol Trades is enabled
+    if USE_CAPITOL_TRADES:
+        if 'Congressional Cluster Buy' not in signal_counts:
+            signal_counts['Congressional Cluster Buy'] = 0
+        if 'Large Congressional Buy' not in signal_counts:
+            signal_counts['Large Congressional Buy'] = 0
     
     # Add tracked ticker count if provided
     tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
