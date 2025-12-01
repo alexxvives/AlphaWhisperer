@@ -28,14 +28,22 @@ jobs:
           grep -n "Starting bulk scrape of Congressional trades" insider_alerts.py | head -3
           grep -n "has_issuer_id" insider_alerts.py | head -3
 
-      - name: Download database artifact from previous run
-        uses: dawidd6/action-download-artifact@v3
-        with:
-          name: database
-          path: data/
-          workflow_conclusion: success
-          if_no_artifact_found: warn
-        continue-on-error: true
+      # FRESH START: Skip downloading old database - create new one from scratch
+      # Remove this comment block and uncomment the download step below after first successful run
+      - name: Fresh database (skip old artifact)
+        run: |
+          echo "Starting fresh - no old database will be used"
+          echo "Congressional trades will be scraped and stored in new database"
+          mkdir -p data
+
+      # - name: Download database artifact from previous run
+      #   uses: dawidd6/action-download-artifact@v3
+      #   with:
+      #     name: database
+      #     path: data/
+      #     workflow_conclusion: success
+      #     if_no_artifact_found: warn
+      #   continue-on-error: true
 
       - name: Install dependencies
         run: |
