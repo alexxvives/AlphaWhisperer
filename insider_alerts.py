@@ -659,6 +659,7 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
         days: Number of days to look back (30, 90, 365, or None for ALL TIME - 3 YEARS filter)
         max_pages: Maximum number of pages to scrape (default 500 to handle all historical data)
     """
+    logger.info(f"=== ENTERING scrape_all_congressional_trades_to_db (days={days}, max_pages={max_pages}) ===")
     driver = None
     new_trades_count = 0
     duplicate_count = 0
@@ -690,9 +691,12 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
         
         logger.info(f"Starting bulk scrape of Congressional trades (last {days} days)...")
+        logger.info(f"Initializing ChromeDriver via webdriver-manager...")
         service = Service(ChromeDriverManager().install())
+        logger.info(f"ChromeDriver service created, launching browser...")
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(20)
+        logger.info(f"Chrome browser launched successfully")
         
         # Navigate to trades page with pageSize parameter
         url = "https://www.capitoltrades.com/trades?pageSize=96"
@@ -1003,9 +1007,7 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
     except ImportError as e:
         logger.error(f"Selenium not installed. Run: pip install selenium webdriver-manager")
     except Exception as e:
-        logger.error(f"Error during bulk scrape: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
+        logger.error(f"Error during bulk scrape: {e}", exc_info=True)
     finally:
         if driver:
             try:
@@ -1045,10 +1047,11 @@ def get_congressional_trades_legacy(ticker: str = None) -> List[Dict]:
         chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         
         # Initialize Chrome driver (webdriver-manager handles driver download automatically)
-        logger.info(f"Fetching recent Congressional trades...")
+        logger.info(f"Initializing Chrome WebDriver...")
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(15)
+        logger.info(f"Chrome WebDriver initialized successfully")
         
         # Visit trades page - filter by ticker if provided
         if ticker:
@@ -4693,10 +4696,11 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         if USE_CAPITOL_TRADES:
             try:
                 logger.info("Refreshing Congressional trades data...")
+                logger.info("USE_CAPITOL_TRADES is enabled, starting scrape...")
                 scrape_all_congressional_trades_to_db()
                 logger.info("Congressional trades refreshed successfully")
             except Exception as e:
-                logger.error(f"Failed to refresh Congressional trades: {e}")
+                logger.error(f"Failed to refresh Congressional trades: {e}", exc_info=True)
         
         # Store in database for deduplication
         new_trades = store_openinsider_trades(df)
