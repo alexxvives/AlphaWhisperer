@@ -1,4 +1,5 @@
 """Backtesting engine for insider trading signals."""
+"""Backtesting engine for insider trading signals."""
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 

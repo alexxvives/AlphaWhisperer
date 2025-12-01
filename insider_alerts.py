@@ -210,14 +210,13 @@ def init_database():
                 state TEXT,
                 ticker TEXT NOT NULL,
                 company_name TEXT,
-                issuer_id TEXT,
                 trade_type TEXT NOT NULL,
                 size_range TEXT,
                 price REAL,
                 traded_date TEXT NOT NULL,
                 published_date TEXT NOT NULL,
                 filed_after_days INTEGER,
-                owner_type TEXT,
+                issuer_id TEXT,
                 scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(politician_name, ticker, traded_date, trade_type, published_date)
             )
@@ -406,9 +405,9 @@ def store_congressional_trade(trade: Dict) -> bool:
             cursor = conn.execute("""
                 INSERT OR IGNORE INTO congressional_trades 
                 (politician_name, politician_id, party, chamber, state, ticker, company_name,
-                 issuer_id, trade_type, size_range, price, traded_date, published_date, 
-                 filed_after_days, owner_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 trade_type, size_range, price, traded_date, published_date, 
+                 filed_after_days, issuer_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 trade.get('politician'),
                 trade.get('politician_id'),
@@ -417,14 +416,13 @@ def store_congressional_trade(trade: Dict) -> bool:
                 trade.get('state'),
                 trade.get('ticker'),
                 trade.get('company_name'),
-                trade.get('issuer_id'),
                 trade.get('type'),
                 trade.get('size'),
                 trade.get('price_numeric'),
                 trade.get('traded_date'),
                 trade.get('published_date'),
                 trade.get('filed_after_days_numeric'),
-                trade.get('owner')
+                trade.get('issuer_id')
             ))
             conn.commit()
             return cursor.rowcount > 0  # True if new row inserted
@@ -732,35 +730,34 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                     # Get row text for parsing
                     row_text = row.get_text()
                     
-                    # Extract party, chamber, state from politician info div
+                    # Extract party, chamber, state from first cell
+                    # Format: "NamePartyChamberState" e.g. "Dave McCormickRepublicanSenatePA"
                     party = None
                     chamber = None
                     state = None
                     
-                    # Find the politician info div with party/chamber/state
-                    politician_info = row.find('div', class_='politician-info')
-                    if politician_info:
-                        info_text = politician_info.get_text()
+                    cells = row.find_all('td')
+                    if cells:
+                        first_cell = cells[0].get_text(strip=True)
                         
                         # Extract party
-                        if 'Republican' in info_text:
-                            party = "R"
-                        elif 'Democrat' in info_text:
-                            party = "D"
-                        elif 'Independent' in info_text:
-                            party = "I"
+                        if 'Republican' in first_cell:
+                            party = 'R'
+                        elif 'Democrat' in first_cell:
+                            party = 'D'
+                        elif 'Other' in first_cell:
+                            party = 'O'
                         
                         # Extract chamber
-                        if 'House' in info_text:
-                            chamber = "House"
-                        elif 'Senate' in info_text:
-                            chamber = "Senate"
+                        if 'House' in first_cell:
+                            chamber = 'House'
+                        elif 'Senate' in first_cell:
+                            chamber = 'Senate'
                         
-                        # Extract state - look for state code spans
-                        import re
-                        state_span = politician_info.find('span', class_=re.compile('us-state'))
-                        if state_span:
-                            state = state_span.get_text(strip=True).upper()[:2]
+                        # Extract state - last 2 characters after House/Senate
+                        state_match = re.search(r'(House|Senate)([A-Z]{2})$', first_cell)
+                        if state_match:
+                            state = state_match.group(2)
                     
                     # Determine transaction type
                     trade_type = None
@@ -795,35 +792,40 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                         if '/issuers/' in issuer_href:
                             issuer_id = issuer_href.split('/issuers/')[-1].strip('/')
                     
-                    # Extract dates, size, price, owner from cells
-                    cells = row.find_all('td')
+                    # Extract dates, size, price from cells
                     published_date = None
                     traded_date = None
                     filed_after_days = None
-                    owner_type = None
                     size_range = None
                     price_numeric = None
                     
-                    from datetime import datetime
+                    from datetime import datetime, timedelta
                     current_year = datetime.now().year
+                    today = datetime.now().date()
+                    yesterday = today - timedelta(days=1)
                     
                     for cell in cells:
                         cell_text = cell.get_text(strip=True)
+                        cell_lower = cell_text.lower()
                         
-                        # Match published date - if it contains time (HH:MM), it's today
+                        # Match published date - if it contains time (HH:MM), check for today/yesterday
                         if not published_date:
                             time_match = re.search(r'\d{1,2}:\d{2}', cell_text)
                             if time_match:
-                                # Published today - store as YYYY-MM-DD
-                                published_date = datetime.now().strftime("%Y-%m-%d")
+                                # Look for today/yesterday in the same cell
+                                if 'yesterday' in cell_lower:
+                                    published_date = yesterday.strftime("%Y-%m-%d")
+                                else:
+                                    # Default to today if time is present (either says "today" or just time)
+                                    published_date = today.strftime("%Y-%m-%d")
                             elif any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                                                        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                                # Extract date and year together - format is like "2 Nov2025"
-                                match = re.search(r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(20\d{2})?', cell_text)
+                                # Extract date and year - format can be "2 Nov2025" or "2 Nov 2025"
+                                match = re.search(r'(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(20\d{2})?', cell_text)
                                 if match:
                                     day = match.group(1)
                                     month = match.group(2)
-                                    year = match.group(3) if match.group(3) else current_year
+                                    year = match.group(3) if match.group(3) else str(current_year)
                                     # Convert to YYYY-MM-DD format
                                     try:
                                         date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
@@ -835,12 +837,12 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                         elif not traded_date:
                             if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
                                                                       'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                                # Extract date and year together - format is like "2 Nov2025"
-                                match = re.search(r'(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(20\d{2})?', cell_text)
+                                # Extract date and year - format can be "2 Nov2025" or "2 Nov 2025"
+                                match = re.search(r'(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(20\d{2})?', cell_text)
                                 if match:
                                     day = match.group(1)
                                     month = match.group(2)
-                                    year = match.group(3) if match.group(3) else current_year
+                                    year = match.group(3) if match.group(3) else str(current_year)
                                     # Convert to YYYY-MM-DD format
                                     try:
                                         date_obj = datetime.strptime(f"{day} {month} {year}", "%d %b %Y")
@@ -859,17 +861,6 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                                         filed_after_days = int(value_div.get_text(strip=True))
                                     except:
                                         pass
-                        
-                        # Match owner type
-                        if any(owner in cell_text for owner in ['Joint', 'Child', 'Spouse', 'Undisclosed']):
-                            if 'Joint' in cell_text:
-                                owner_type = 'Joint'
-                            elif 'Child' in cell_text:
-                                owner_type = 'Child'
-                            elif 'Spouse' in cell_text:
-                                owner_type = 'Spouse'
-                            elif 'Undisclosed' in cell_text:
-                                owner_type = 'Undisclosed'
                         
                         # Match size range
                         if not size_range:
@@ -917,7 +908,6 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                         'traded_date': traded_date or published_date,
                         'published_date': published_date or traded_date,
                         'filed_after_days_numeric': filed_after_days,
-                        'owner': owner_type
                     }
                     
                     # Store in database (with deduplication)

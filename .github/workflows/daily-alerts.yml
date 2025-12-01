@@ -34,6 +34,11 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install Chrome for Selenium
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
       - name: Initialize database if not exists
         run: |
           python -c "import insider_alerts; insider_alerts.init_database()"
