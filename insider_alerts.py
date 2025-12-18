@@ -86,9 +86,13 @@ CONGRESSIONAL_LOOKBACK_DAYS = int(os.getenv("CONGRESSIONAL_LOOKBACK_DAYS", "30")
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
 CLUSTER_DAYS = int(os.getenv("CLUSTER_DAYS", "5"))
-MIN_LARGE_BUY = float(os.getenv("MIN_LARGE_BUY", "250000"))
-MIN_CEO_CFO_BUY = float(os.getenv("MIN_CEO_CFO_BUY", "100000"))
+MIN_LARGE_BUY = float(os.getenv("MIN_LARGE_BUY", "500000"))  # Raised from 250K to reduce noise
+MIN_CEO_CFO_BUY = float(os.getenv("MIN_CEO_CFO_BUY", "250000"))  # Raised from 100K to reduce noise
 MIN_CLUSTER_BUY_VALUE = float(os.getenv("MIN_CLUSTER_BUY_VALUE", "300000"))
+MIN_CLUSTER_INSIDERS = int(os.getenv("MIN_CLUSTER_INSIDERS", "5"))  # Require 5+ insiders (not 3)
+MIN_CORP_PURCHASE = float(os.getenv("MIN_CORP_PURCHASE", "250000"))  # Minimum for corporation purchases
+MIN_CONGRESSIONAL_CLUSTER_VALUE = float(os.getenv("MIN_CONGRESSIONAL_CLUSTER_VALUE", "50000"))  # Minimum total for Congressional cluster
+MAX_FILING_DELAY_DAYS = int(os.getenv("MAX_FILING_DELAY_DAYS", "45"))  # Filter trades filed too late
 MIN_FIRST_BUY_12M = float(os.getenv("MIN_FIRST_BUY_12M", "50000"))
 MIN_SECTOR_CLUSTER_VALUE = float(os.getenv("MIN_SECTOR_CLUSTER_VALUE", "1000000"))
 MIN_BEARISH_CLUSTER_VALUE = float(os.getenv("MIN_BEARISH_CLUSTER_VALUE", "1000000"))
@@ -2276,7 +2280,7 @@ def detect_cluster_buying(df: pd.DataFrame) -> List[InsiderAlert]:
             unique_insiders = window_trades["Insider Name"].nunique()
             total_value = window_trades["Value"].sum()
             
-            if unique_insiders >= 3 and total_value >= MIN_CLUSTER_BUY_VALUE:
+            if unique_insiders >= MIN_CLUSTER_INSIDERS and total_value >= MIN_CLUSTER_BUY_VALUE:
                 company_name = window_trades["Company Name"].iloc[0] if "Company Name" in window_trades.columns else ticker
                 
                 alert = InsiderAlert(
@@ -2301,7 +2305,8 @@ def detect_cluster_buying(df: pd.DataFrame) -> List[InsiderAlert]:
 
 def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
-    Detect C-Suite buy: Any C-Suite executive buys ≥ MIN_CEO_CFO_BUY.
+    Detect C-Suite buy: Top executives (CEO/CFO/President) buy ≥ $250K.
+    Restricted to highest-level executives only to reduce noise.
     
     Args:
         df: Trades DataFrame
@@ -2311,11 +2316,10 @@ def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
     alerts = []
     
-    # C-Suite titles to include
+    # Only top C-Suite titles (removed VP, GC, Officer to reduce noise)
     c_suite_titles = [
         "CEO", "CFO", "COO", "President", "Pres", 
-        "Chief Executive Officer", "Chief Financial Officer", "Chief Operating Officer",
-        "VP", "Vice President", "GC", "General Counsel", "Officer"
+        "Chief Executive Officer", "Chief Financial Officer", "Chief Operating Officer"
     ]
     
     # Filter to C-Suite buys
@@ -2348,7 +2352,7 @@ def detect_ceo_cfo_buy(df: pd.DataFrame) -> List[InsiderAlert]:
 
 def detect_large_single_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
-    Detect large single buy: Any insider buys ≥ MIN_LARGE_BUY.
+    Detect large single buy: Any insider buys ≥ $500K (raised from $250K to reduce noise).
     
     Args:
         df: Trades DataFrame
@@ -2470,11 +2474,11 @@ def detect_bearish_cluster_selling(df: pd.DataFrame) -> List[InsiderAlert]:
                 (ticker_sales["Trade Date"] <= window_end)
             ]
             
-            # Check if cluster criteria met
+            # Check if cluster criteria met (5+ insiders for higher confidence)
             unique_insiders = window_trades["Insider Name"].nunique()
             total_value = window_trades["Value"].sum()
             
-            if unique_insiders >= 3 and total_value >= MIN_BEARISH_CLUSTER_VALUE:
+            if unique_insiders >= MIN_CLUSTER_INSIDERS and total_value >= MIN_BEARISH_CLUSTER_VALUE:
                 company_name = window_trades["Company Name"].iloc[0] if "Company Name" in window_trades.columns else ticker
                 
                 alert = InsiderAlert(
@@ -2523,8 +2527,11 @@ def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
         'Trust', 'Management', 'Investments', 'Technologies'
     ]
     
-    # Filter to buys only
-    buys = df[df["Trade Type"] == "Buy"].copy()
+    # Filter to buys only, with minimum value
+    buys = df[
+        (df["Trade Type"] == "Buy") &
+        (df["Value"] >= MIN_CORP_PURCHASE)
+    ].copy()
     
     # Identify corporate buyers by name patterns
     for _, row in buys.iterrows():
@@ -2581,15 +2588,27 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
             query = """
                 SELECT ticker, COUNT(DISTINCT politician_name) as num_politicians,
                        GROUP_CONCAT(DISTINCT politician_name) as politicians,
-                       GROUP_CONCAT(DISTINCT party) as parties
+                       GROUP_CONCAT(DISTINCT party) as parties,
+                       SUM(CASE 
+                           WHEN size_range LIKE '%1K-15K%' THEN 8000
+                           WHEN size_range LIKE '%15K-50K%' THEN 32500
+                           WHEN size_range LIKE '%50K-100K%' THEN 75000
+                           WHEN size_range LIKE '%100K-250K%' THEN 175000
+                           WHEN size_range LIKE '%250K-500K%' THEN 375000
+                           WHEN size_range LIKE '%500K-1M%' THEN 750000
+                           WHEN size_range LIKE '%1M%' THEN 2500000
+                           ELSE 0
+                       END) as estimated_total_value
                 FROM congressional_trades
                 WHERE trade_type = "BUY"
                 AND published_date >= date("now", "-30 days")
+                AND filed_after_days <= ?
                 GROUP BY ticker
                 HAVING COUNT(DISTINCT politician_name) >= 3
+                AND estimated_total_value >= ?
                 ORDER BY num_politicians DESC
             """
-            cursor = conn.execute(query)
+            cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS, MIN_CONGRESSIONAL_CLUSTER_VALUE))
             clusters = cursor.fetchall()
             
             for cluster in clusters:
@@ -2716,13 +2735,14 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                            traded_date, published_date, filed_after_days, issuer_id
                     FROM congressional_trades
                     WHERE trade_type = "BUY"
-                    AND published_date >= date("now", "-7 days")
-                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' 
-                         OR size_range LIKE '%500K%' OR size_range LIKE '%1M%' 
-                         OR size_range LIKE '%5M%' OR size_range LIKE '%25M%'
-                         OR size_range LIKE '>%')
+                    AND published_date >= date("now", "-30 days")
+                    AND filed_after_days <= ?
+                    AND (size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
+                         OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
+                         OR size_range LIKE '%25M%' OR size_range LIKE '>%')
                     ORDER BY published_date DESC
                 """
+                cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
             else:
                 query = """
                     SELECT politician_name, politician_id, party, chamber, state,
@@ -2730,14 +2750,14 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                            traded_date, published_date, filed_after_days
                     FROM congressional_trades
                     WHERE trade_type = "BUY"
-                    AND published_date >= date("now", "-7 days")
-                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' 
-                         OR size_range LIKE '%500K%' OR size_range LIKE '%1M%' 
-                         OR size_range LIKE '%5M%' OR size_range LIKE '%25M%'
-                         OR size_range LIKE '>%')
+                    AND published_date >= date("now", "-30 days")
+                    AND filed_after_days <= ?
+                    AND (size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
+                         OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
+                         OR size_range LIKE '%25M%' OR size_range LIKE '>%')
                     ORDER BY published_date DESC
                 """
-            cursor = conn.execute(query)
+                cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
             large_buys = cursor.fetchall()
             
             for trade in large_buys:
@@ -2827,8 +2847,106 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
         except Exception as e:
             logger.error(f"Error detecting Congressional signals: {e}", exc_info=True)
     
-    logger.info(f"Total signals detected: {len(all_alerts)}")
+    logger.info(f"Total signals detected before deduplication: {len(all_alerts)}")
+    
+    # Deduplicate: If same ticker+insider triggers multiple signals, keep only highest priority
+    all_alerts = deduplicate_alerts(all_alerts)
+    
+    logger.info(f"Total signals after deduplication: {len(all_alerts)}")
     return all_alerts
+
+
+def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
+    """
+    Remove duplicate alerts for same ticker when a trade triggers multiple signal types.
+    Keeps only the highest-priority signal per ticker+insider combination.
+    
+    Priority order (highest to lowest):
+    1. Congressional Cluster Buy
+    2. Large Congressional Buy  
+    3. Corporation Purchase
+    4. Cluster Buying
+    5. C-Suite Buy
+    6. Large Single Buy
+    7. Bearish Cluster Selling
+    8. Strategic Investor Buy
+    
+    Args:
+        alerts: List of InsiderAlert objects
+        
+    Returns:
+        Deduplicated list of InsiderAlert objects
+    """
+    if not alerts:
+        return alerts
+    
+    # Define priority ranking (lower number = higher priority)
+    priority_map = {
+        'Congressional Cluster Buy': 1,
+        'Large Congressional Buy': 2,
+        'Corporation Purchase': 3,
+        'Cluster Buying': 4,
+        'C-Suite Buy': 5,
+        'Large Single Buy': 6,
+        'Bearish Cluster Selling': 7,
+        'Strategic Investor Buy': 8,
+    }
+    
+    # Group alerts by ticker
+    ticker_groups = {}
+    for alert in alerts:
+        ticker = alert.ticker
+        if ticker not in ticker_groups:
+            ticker_groups[ticker] = []
+        ticker_groups[ticker].append(alert)
+    
+    deduplicated = []
+    
+    for ticker, ticker_alerts in ticker_groups.items():
+        if len(ticker_alerts) == 1:
+            # Only one signal for this ticker, keep it
+            deduplicated.append(ticker_alerts[0])
+        else:
+            # Multiple signals for same ticker - check if they're truly duplicates
+            # Keep clusters (multiple insiders) separate from single-insider signals
+            cluster_alerts = []
+            single_alerts = {}  # key: insider_name -> alert
+            
+            for alert in ticker_alerts:
+                # Cluster signals involve multiple people
+                if 'Cluster' in alert.signal_type:
+                    cluster_alerts.append(alert)
+                else:
+                    # Single-insider signals - track by insider name
+                    if not alert.trades.empty and 'Insider Name' in alert.trades.columns:
+                        insider_name = alert.trades['Insider Name'].iloc[0]
+                        
+                        # If we already have a signal for this insider, keep higher priority one
+                        if insider_name in single_alerts:
+                            existing = single_alerts[insider_name]
+                            existing_priority = priority_map.get(existing.signal_type, 99)
+                            new_priority = priority_map.get(alert.signal_type, 99)
+                            
+                            if new_priority < existing_priority:
+                                single_alerts[insider_name] = alert
+                                logger.debug(f"Replaced {existing.signal_type} with {alert.signal_type} for {ticker} - {insider_name}")
+                        else:
+                            single_alerts[insider_name] = alert
+                    else:
+                        # No insider name found, keep it
+                        single_alerts[f"unknown_{len(single_alerts)}"] = alert
+            
+            # Add all cluster alerts (they represent different groups)
+            deduplicated.extend(cluster_alerts)
+            
+            # Add single-insider alerts (deduplicated per insider)
+            deduplicated.extend(single_alerts.values())
+    
+    removed_count = len(alerts) - len(deduplicated)
+    if removed_count > 0:
+        logger.info(f"Removed {removed_count} duplicate signals (same ticker+insider, lower priority)")
+    
+    return deduplicated
 
 
 # State file functions removed - using database-only deduplication
