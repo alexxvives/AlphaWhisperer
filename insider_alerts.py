@@ -4802,6 +4802,29 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
             except Exception:
                 pass  # If we can't determine recency, don't modify score
             
+            # Position Impact Multiplier: Filters out "cosmetic" purchases
+            # +20% if position increase >20%
+            # +10% if position increase >10%
+            # 0% if position increase <5%
+            try:
+                if not alert.trades.empty and 'Delta Own' in alert.trades.columns:
+                    # Extract Delta Own percentage values
+                    delta_vals = alert.trades['Delta Own'].astype(str).str.replace('%', '').str.replace('+', '')
+                    delta_vals = pd.to_numeric(delta_vals, errors='coerce')
+                    
+                    # Use max delta (most significant position increase)
+                    max_delta = delta_vals.max()
+                    
+                    if pd.notna(max_delta):
+                        if max_delta >= 20:
+                            score *= 1.20  # +20% for significant position increase
+                        elif max_delta >= 10:
+                            score *= 1.10  # +10% for moderate position increase
+                        elif max_delta < 5:
+                            score *= 0.9   # -10% penalty for cosmetic purchases
+            except Exception:
+                pass  # If we can't determine position impact, don't modify score
+            
             return score
         
         # Sort by priority score (highest first)
@@ -4929,6 +4952,23 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         
         # Detect signals from ALL trades in database
         alerts = detect_signals(df)
+        
+        # Log signal counts by type
+        signal_counts = {}
+        for alert in alerts:
+            signal_type = alert.signal_type
+            signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
+        
+        logger.info("=" * 60)
+        logger.info("SIGNAL DETECTION SUMMARY")
+        logger.info("=" * 60)
+        logger.info(f"Total signals detected: {len(alerts)}")
+        logger.info("")
+        logger.info("Breakdown by signal type:")
+        for signal_type in sorted(signal_counts.keys()):
+            count = signal_counts[signal_type]
+            logger.info(f"  {signal_type}: {count}")
+        logger.info("=" * 60)
         
         # Process alerts (pass tracked ticker activity for sending with signals)
         process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity, test_mode=test_mode)
