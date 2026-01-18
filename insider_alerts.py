@@ -2689,7 +2689,7 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 trades_df = pd.DataFrame(trades_data)
                 
                 # Signal type: Add "Bipartisan" prefix if both D and R involved (rare = extra bullish)
-                signal_type = "Bipartisan Elite Congressional Cluster" if is_bipartisan else "Elite Congressional Cluster"
+                signal_type = "Congressional Cluster Buy"
                 
                 alert = InsiderAlert(
                     signal_type=signal_type,
@@ -2706,7 +2706,7 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 )
                 alerts.append(alert)
         
-        logger.info(f"Detected {len(alerts)} Elite Congressional cluster buy signals (2+ Elite traders)")
+        logger.info(f"Detected {len(alerts)} Congressional cluster buy signals (2+ Elite traders)")
     except Exception as e:
         logger.error(f"Error detecting Congressional cluster buys: {e}", exc_info=True)
     
@@ -2807,7 +2807,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                         pass
                 
                 alert = InsiderAlert(
-                    signal_type="Elite Congressional Buy",
+                    signal_type="Congressional Buy",
                     ticker=ticker,
                     company_name=trade['company_name'] or ticker,
                     trades=trades_df,
@@ -2823,7 +2823,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                 )
                 alerts.append(alert)
         
-        logger.info(f"Detected {len(alerts)} Elite Congressional buy signals ($100K+, Elite traders only)")
+        logger.info(f"Detected {len(alerts)} Congressional buy signals ($100K+, Elite traders only)")
     except Exception as e:
         logger.error(f"Error detecting large Congressional buys: {e}", exc_info=True)
     
@@ -3106,9 +3106,9 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
     # 1. Signal Type Hierarchy
     signal_type_scores = {
         'Trinity Signal': 10,
-        'Elite Congressional Cluster': 9,
-        'Bipartisan Elite Congressional Cluster': 9.5,
-        'Elite Congressional Buy': 8,
+        'Congressional Cluster Buy': 9,
+        'Investment Fund Buy': 8.5,
+        'Congressional Buy': 8,
         'Cluster Buying': 7,
         'Corporation Purchase': 5,                     # Reduced from 7 - still significant but not dominating
         'C-Suite Buy': 6,
@@ -5374,17 +5374,18 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     
     # Always include Congressional signals in the count (even if 0) when Capitol Trades is enabled
     if USE_CAPITOL_TRADES:
-        if 'Elite Congressional Cluster' not in signal_counts:
-            signal_counts['Elite Congressional Cluster'] = 0
-        if 'Elite Congressional Buy' not in signal_counts:
-            signal_counts['Elite Congressional Buy'] = 0
+        if 'Congressional Cluster Buy' not in signal_counts:
+            signal_counts['Congressional Cluster Buy'] = 0
+        if 'Congressional Buy' not in signal_counts:
+            signal_counts['Congressional Buy'] = 0
     
     # Always include all signal types in the summary (even if 0)
     # Note: Bearish signals removed - we focus on BUY opportunities only
     all_signal_types = [
         'Trinity Signal',
-        'Elite Congressional Cluster',
-        'Elite Congressional Buy',
+        'Congressional Cluster Buy',
+        'Investment Fund Buy',
+        'Congressional Buy',
         'Cluster Buying',
         'C-Suite Buy',
         'Corporation Purchase',
