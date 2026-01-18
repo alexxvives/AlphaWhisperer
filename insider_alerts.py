@@ -5191,8 +5191,10 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
         else:
             regular_alerts.append(alert)
     
-    # Cap regular signals using TOP_SIGNALS_PER_DAY configuration (currently set to 1)
-    if TOP_SIGNALS_PER_DAY > 0 and len(regular_alerts) > TOP_SIGNALS_PER_DAY:
+    # Regular alerts are already capped by TOP_SIGNALS_PER_DAY in the fallback logic above
+    # No additional capping needed here - just log what we have
+    if len(regular_alerts) > 0:
+        logger.info(f"Sending {len(regular_alerts)} regular signal(s) (already filtered to TOP {TOP_SIGNALS_PER_DAY})")
         logger.info(f"Capping regular signals from {len(regular_alerts)} to {TOP_SIGNALS_PER_DAY}")
         
         # Smart prioritization based on signal strength
@@ -5361,12 +5363,8 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
                 pass  # If we can't determine position impact, don't modify score
             
             return score
-        
-        # Sort by priority score (highest first)
-        regular_alerts.sort(key=lambda a: calculate_priority_score(a), reverse=True)
-        regular_alerts = regular_alerts[:TOP_SIGNALS_PER_DAY]
     
-    # Count ALL signals by type for intro message (not just top 3)
+    # Count ALL signals by type for intro message (not just top N)
     signal_counts = {}
     all_detected_alerts = [alert for alert, _ in tracked_alerts] + new_alerts
     for alert in all_detected_alerts:
