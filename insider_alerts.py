@@ -317,6 +317,27 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_trade_date ON openinsider_trades(trade_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_scraped_at ON openinsider_trades(scraped_at)")
         
+        # Superinvestor holdings table (Dataroma 13F filings)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dataroma_holdings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                manager_code TEXT NOT NULL,
+                manager_name TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                company_name TEXT,
+                portfolio_pct REAL,
+                shares_held INTEGER,
+                value_usd REAL,
+                quarter TEXT,
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(manager_code, ticker, quarter)
+            )
+        """)
+        
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dataroma_ticker ON dataroma_holdings(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dataroma_manager ON dataroma_holdings(manager_code)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dataroma_quarter ON dataroma_holdings(quarter)")
+        
         # Sent alerts tracking table (prevent duplicate alerts)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS sent_alerts (
@@ -5119,11 +5140,21 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     
     # Filter to only new alerts (check database for deduplication)
     new_alerts = []
+    duplicate_alerts = []
     for alert in alerts:
         if not is_alert_already_sent(alert.alert_id):
             new_alerts.append(alert)
+        else:
+            duplicate_alerts.append(alert)
     
     logger.info(f"Found {len(new_alerts)} new alerts (out of {len(alerts)} total)")
+    
+    # If all top signals already sent, log which ones were blocked
+    if len(new_alerts) == 0 and len(duplicate_alerts) > 0:
+        logger.warning("⚠️ All top-scoring signals were already sent within the last 30 days:")
+        for alert in duplicate_alerts:
+            logger.warning(f"  - {alert.ticker} ({alert.signal_type}) - Blocked by deduplication")
+        logger.info("No new signals to report. System working correctly - preventing duplicate alerts.")
     
     # Separate tracked ticker alerts from regular signals
     tracked_alerts = []
@@ -5321,21 +5352,21 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     
     # Always include Congressional signals in the count (even if 0) when Capitol Trades is enabled
     if USE_CAPITOL_TRADES:
-        if 'Congressional Cluster Buy' not in signal_counts:
-            signal_counts['Congressional Cluster Buy'] = 0
-        if 'Large Congressional Buy' not in signal_counts:
-            signal_counts['Large Congressional Buy'] = 0
+        if 'Elite Congressional Cluster' not in signal_counts:
+            signal_counts['Elite Congressional Cluster'] = 0
+        if 'Elite Congressional Buy' not in signal_counts:
+            signal_counts['Elite Congressional Buy'] = 0
     
     # Always include all signal types in the summary (even if 0)
+    # Note: Bearish signals removed - we focus on BUY opportunities only
     all_signal_types = [
-        'Congressional Cluster Buy',
-        'Large Congressional Buy', 
-        'C-Suite Buy',
+        'Trinity Signal',
+        'Elite Congressional Cluster',
+        'Elite Congressional Buy',
         'Cluster Buying',
-        'Large Single Buy',
-        'Bearish Cluster Selling',
+        'C-Suite Buy',
         'Corporation Purchase',
-        'Strategic Investor Buy'
+        'Large Single Buy'
     ]
     for sig_type in all_signal_types:
         if sig_type not in signal_counts:

@@ -685,7 +685,7 @@ Total runtime: 142 seconds
 
 ### 2. Signal Detection (Pattern Recognition)
 
-The system implements **9 distinct signal types** across three categories:
+The system implements **8 distinct signal types** across three categories (Bearish Cluster Selling removed - focus on BUY opportunities only):
 
 #### Corporate Insider Signals
 
@@ -736,16 +736,13 @@ The system tracks **only proven high-performance politicians** to eliminate nois
 - **Why it matters**: Multiple proven traders converging on same opportunity = strong consensus
 - **Example**: Josh Gottheimer (D) + Michael McCaul (R) both buy GOOGL → Bipartisan cluster
 
-**G. Tracked Ticker Activity** ⭐⭐⭐
+**H. Tracked Ticker Activity** ⭐⭐⭐
 - **Logic**: Any insider activity on user-specified tickers
 - **Configuration**: Users track tickers via Telegram bot (`@bot $AAPL`)
 - **Why it matters**: Personalized monitoring for positions you care about
 - **Example**: You track MSFT, any insider buy/sell triggers @mention in Telegram
 
-**H. Bearish Cluster Selling** ⚠️
-- **Logic**: 3+ insiders selling within 5 days, $1M+ total
-- **Why it matters**: Exit signal - multiple insiders dumping stock simultaneously
-- **Example**: CEO, CFO, and 2 directors all sell large positions in same week
+**Note**: Bearish Cluster Selling signal has been removed - system focuses exclusively on BUY opportunities and high-conviction signals.
 
 #### Trinity Signals (Superinvestor Convergence) 🔺
 
@@ -1135,12 +1132,15 @@ ahead (earnings beat, product launch, or acquisition).
 The system was working correctly - there simply were no new Congressional trades filed in the last 7 days. Politicians were on holiday break (Dec 18 → Jan 17 = 30 day gap). The Elite filter successfully reduced noise by focusing only on the Top 15 proven traders.
 
 **Today's Full Detection:**
-- Cluster Buying: 1
-- C-Suite Buy: 2  
-- Large Single Buy: 9
-- Corporation Purchase: 6
-- Elite Congressional Buy: 2
-- **Total: 20 signals detected**
+- Cluster Buying: 2
+- C-Suite Buy: 5  
+- Large Single Buy: 69
+- Corporation Purchase: 45
+- Elite Congressional Buy: 1
+- **Total: 122 signals detected → 56 after deduplication**
+- **Top 1 filter applied: Highest-scoring signal selected for reporting**
+
+**Note**: System now filters to **TOP 1 signal per day** (not 3). Composite scoring ranks all signals, reports only #1 highest-conviction opportunity. All 3 top signals in this run (AKTS, ASST, SPT) were already sent within last 30 days, so no new signals delivered. Deduplication working correctly.
 
 ---
 
