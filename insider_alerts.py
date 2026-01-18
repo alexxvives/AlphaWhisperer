@@ -40,14 +40,6 @@ from tenacity import (
     wait_exponential,
 )
 
-# Import Trinity Signal detection from dataroma_scraper
-try:
-    from dataroma_scraper import detect_trinity_signals as dataroma_detect_trinity, detect_temporal_convergence
-    DATAROMA_AVAILABLE = True
-except ImportError:
-    logger.warning("dataroma_scraper.py not found - Trinity Signals disabled")
-    DATAROMA_AVAILABLE = False
-
 # Load environment variables
 load_dotenv()
 
@@ -65,6 +57,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Import Trinity Signal detection from dataroma_scraper (after logger setup)
+try:
+    from dataroma_scraper import detect_trinity_signals as dataroma_detect_trinity, detect_temporal_convergence
+    DATAROMA_AVAILABLE = True
+    logger.info("Trinity Signal detection enabled (dataroma_scraper.py found)")
+except ImportError:
+    logger.warning("dataroma_scraper.py not found - Trinity Signals disabled")
+    DATAROMA_AVAILABLE = False
 
 # Database for Congressional trades
 DATA_DIR = Path("data")
