@@ -89,7 +89,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Comma-separated for mult
 # NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
 
 # Top Signals Configuration
-TOP_SIGNALS_PER_DAY = int(os.getenv("TOP_SIGNALS_PER_DAY", "3"))  # Only report top N signals
+TOP_SIGNALS_PER_DAY = int(os.getenv("TOP_SIGNALS_PER_DAY", "1"))  # Only report top N signals (default: 1 = highest only)
 
 # Congressional Trading (CapitolTrades)
 USE_CAPITOL_TRADES = os.getenv("USE_CAPITOL_TRADES", "true").lower() == "true"
@@ -3842,8 +3842,9 @@ def format_email_html(alert: InsiderAlert) -> str:
                     html += f'<div style="color:#7f8c8d; font-size:0.85em; margin-top:4px;">{pub_date}</div>'
                 html += '</div>'
         
-        # Confidence score display (AI insights removed)
+        # Confidence score display with AI insights
         confidence_score, score_reason = calculate_confidence_score(alert, context)
+        formatted_insight = generate_ai_insight(alert, context, confidence_score)
         html += f"""
             <div class="ai-insight">
                 <h2 style="margin-top:0;">🧠 AI Insight</h2>
