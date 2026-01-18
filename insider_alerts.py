@@ -5124,15 +5124,16 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         return False
 
 
-def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_activity: Optional[List] = None, test_mode: bool = False):
+def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ticker_activity: Optional[List] = None, test_mode: bool = False, all_ranked_alerts: Optional[List[InsiderAlert]] = None):
     """
     Process list of alerts: check if new, send emails, update state.
     
     Args:
-        alerts: List of InsiderAlert objects
+        alerts: List of InsiderAlert objects (top-N filtered)
         dry_run: If True, don't send emails or update state
         tracked_ticker_activity: List of tracked ticker activity tuples
         test_mode: If True, don't mark alerts as sent (for testing)
+        all_ranked_alerts: Complete ranked list of all signals (for fallback when top signals are duplicates)
     """
     if not alerts:
         logger.info("No alerts to process")
@@ -5149,8 +5150,30 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     
     logger.info(f"Found {len(new_alerts)} new alerts (out of {len(alerts)} total)")
     
-    # If all top signals already sent, log which ones were blocked
-    if len(new_alerts) == 0 and len(duplicate_alerts) > 0:
+    # If all top signals already sent and we have more ranked alerts, pull from them
+    if len(new_alerts) == 0 and len(duplicate_alerts) > 0 and all_ranked_alerts and TOP_SIGNALS_PER_DAY > 0:
+        logger.warning("⚠️ All top-scoring signals were already sent within the last 30 days:")
+        for alert in duplicate_alerts:
+            logger.warning(f"  - {alert.ticker} ({alert.signal_type}) - Blocked by deduplication")
+        logger.info(f"\n🔄 Checking next {len(all_ranked_alerts) - len(alerts)} lower-ranked signals for fresh opportunities...")
+        
+        # Continue down the ranked list until we find TOP_SIGNALS_PER_DAY fresh signals
+        checked_count = len(alerts)
+        for alert in all_ranked_alerts[checked_count:]:
+            if not is_alert_already_sent(alert.alert_id):
+                new_alerts.append(alert)
+                logger.info(f"✅ Found fresh signal #{len(new_alerts)}: {alert.ticker} ({alert.signal_type})")
+                if len(new_alerts) >= TOP_SIGNALS_PER_DAY:
+                    break
+            else:
+                logger.debug(f"   Skipping {alert.ticker} ({alert.signal_type}) - already sent")
+        
+        if len(new_alerts) > 0:
+            logger.info(f"\n🎯 Successfully found {len(new_alerts)} fresh signal(s) from extended ranking")
+        else:
+            logger.warning("⚠️ All ranked signals were already sent. No new signals available.")
+            logger.info("No new signals to report. System working correctly - preventing duplicate alerts.")
+    elif len(new_alerts) == 0 and len(duplicate_alerts) > 0:
         logger.warning("⚠️ All top-scoring signals were already sent within the last 30 days:")
         for alert in duplicate_alerts:
             logger.warning(f"  - {alert.ticker} ({alert.signal_type}) - Blocked by deduplication")
@@ -5483,6 +5506,7 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         logger.info("=" * 60)
         
         # Apply Top-N signal filter (select only highest-scoring signals)
+        all_ranked_alerts = None  # Keep full ranked list for fallback
         if TOP_SIGNALS_PER_DAY > 0 and len(alerts) > TOP_SIGNALS_PER_DAY:
             logger.info(f"\nApplying Top-{TOP_SIGNALS_PER_DAY} filter to select strongest signals...")
             
@@ -5490,13 +5514,14 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
             if not dry_run:
                 send_signal_summary_email(alerts)
             
-            # Apply the filter
-            filtered_alerts = select_top_signals(alerts, top_n=TOP_SIGNALS_PER_DAY, enrich_context=True)
+            # Apply the filter and keep full ranked list
+            all_ranked_alerts = select_top_signals(alerts, top_n=len(alerts), enrich_context=True)  # Get ALL ranked
+            filtered_alerts = all_ranked_alerts[:TOP_SIGNALS_PER_DAY]  # Take top N
             logger.info(f"Filtered to top {len(filtered_alerts)} signals for reporting\n")
             alerts = filtered_alerts
         
-        # Process alerts (pass tracked ticker activity for sending with signals)
-        process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity, test_mode=test_mode)
+        # Process alerts (pass full ranked list for fallback when top signals are duplicates)
+        process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity, test_mode=test_mode, all_ranked_alerts=all_ranked_alerts)
         
         logger.info("Check completed successfully")
         logger.info("=" * 60)
