@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 # Import Trinity Signal detection from dataroma_scraper (after logger setup)
 try:
-    from dataroma_scraper import detect_trinity_signals as dataroma_detect_trinity, detect_temporal_convergence
+    from dataroma_scraper import detect_trinity_signals as dataroma_detect_trinity, detect_temporal_convergence, detect_investment_fund_buys as dataroma_detect_fund_buys
     DATAROMA_AVAILABLE = True
     logger.info("Trinity Signal detection enabled (dataroma_scraper.py found)")
 except ImportError:

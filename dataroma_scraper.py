@@ -34,6 +34,7 @@ DB_FILE = DATA_DIR / "alphaWhisperer.db"
 # Dataroma URLs
 DATAROMA_MANAGERS_URL = "https://www.dataroma.com/m/managers.php"
 DATAROMA_HOLDINGS_URL = "https://www.dataroma.com/m/holdings.php?m={manager_code}"
+DATAROMA_INSIDER_ACTIVITY_URL = "https://www.dataroma.com/m/ins/ins.php"
 
 # Elite superinvestors to track (can expand this list)
 ELITE_SUPERINVESTORS = {
@@ -105,7 +106,30 @@ def init_dataroma_table():
             CREATE INDEX IF NOT EXISTS idx_dataroma_manager 
             ON dataroma_holdings(manager_code)
         """)
-        logger.info("Dataroma holdings table initialized")
+        
+        # Create new table for daily insider transactions
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dataroma_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                manager_name TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                company_name TEXT,
+                activity_type TEXT NOT NULL,  -- 'BUY', 'SELL', 'ADD', 'REDUCE'
+                transaction_date TEXT,
+                scraped_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(manager_name, ticker, activity_type, transaction_date)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dataroma_trans_ticker
+            ON dataroma_transactions(ticker)
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dataroma_trans_date
+            ON dataroma_transactions(transaction_date)
+        """)
+        
+        logger.info("Dataroma holdings and transactions tables initialized")
 
 
 def scrape_manager_holdings(manager_code: str, manager_name: str) -> List[Dict]:
@@ -297,6 +321,141 @@ def scrape_all_superinvestors():
     
     logger.info(f"Scraping complete: {total_holdings} total holdings from {len(ELITE_SUPERINVESTORS)} superinvestors")
     return total_holdings
+
+
+def scrape_dataroma_insider_activity(lookback_days: int = 30) -> List[Dict]:
+    """
+    DEPRECATED: The /m/ins/ins.php page shows corporate insider Form 4 filings, 
+    not superinvestor fund manager activity.
+    
+    For fund manager activity, use detect_investment_fund_buys() which compares
+    quarterly 13F holdings to detect BUY/ADD/REDUCE/SELL activities.
+    """
+    logger.warning("scrape_dataroma_insider_activity is deprecated - it scrapes corporate insiders, not fund managers")
+    logger.info("Use detect_investment_fund_buys() instead for fund manager activity from quarterly 13Fs")
+    return []
+
+
+def store_transactions(transactions: List[Dict]):
+    """Store transactions in database."""
+    if not transactions:
+        return
+    
+    with get_db() as conn:
+        new_count = 0
+        for txn in transactions:
+            cursor = conn.execute("""
+                INSERT OR IGNORE INTO dataroma_transactions
+                (manager_name, ticker, company_name, activity_type, transaction_date, scraped_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                txn['manager_name'],
+                txn['ticker'],
+                txn['company_name'],
+                txn['activity_type'],
+                txn['transaction_date']
+            ))
+            if cursor.rowcount > 0:
+                new_count += 1
+    
+    logger.info(f"Stored {new_count} new transactions ({len(transactions)} total scraped)")
+
+
+def detect_investment_fund_buys(lookback_quarters: int = 2) -> List[Dict]:
+    """
+    Detect "Investment Fund Buy" signals by comparing quarters of 13F holdings.
+    
+    Signals generated when elite fund managers:
+    1. Enter NEW position (0 shares → any amount)
+    2. INCREASE position significantly (50%+ more shares)
+    3. Hold LARGE position (>2% of portfolio)
+    
+    This uses quarterly 13F data already scraped, comparing Q(current) vs Q(previous).
+    
+    Args:
+        lookback_quarters: How many quarters back to compare (default 2 = most recent 2 quarters)
+        
+    Returns:
+        List of Investment Fund Buy signal dictionaries
+    """
+    signals = []
+    
+    with get_db() as conn:
+        # Get all quarters available in database, sorted newest first
+        cursor = conn.execute("""
+            SELECT DISTINCT quarter
+            FROM dataroma_holdings
+            ORDER BY quarter DESC
+            LIMIT ?
+        """, (lookback_quarters,))
+        
+        quarters = [row[0] for row in cursor.fetchall()]
+        
+        if len(quarters) < 2:
+            logger.warning(f"Need at least 2 quarters of data, found {len(quarters)}")
+            return signals
+        
+        current_quarter = quarters[0]
+        previous_quarter = quarters[1]
+        
+        logger.info(f"Comparing {current_quarter} vs {previous_quarter} for fund activity")
+        
+        # Get current quarter holdings
+        cursor = conn.execute("""
+            SELECT manager_code, manager_name, ticker, company_name, 
+                   portfolio_pct, shares_held, value_usd
+            FROM dataroma_holdings
+            WHERE quarter = ?
+        """, (current_quarter,))
+        
+        current_holdings = {(row[0], row[2]): dict(row) for row in cursor.fetchall()}
+        
+        # Get previous quarter holdings  
+        cursor = conn.execute("""
+            SELECT manager_code, manager_name, ticker, company_name,
+                   portfolio_pct, shares_held, value_usd
+            FROM dataroma_holdings
+            WHERE quarter = ?
+        """, (previous_quarter,))
+        
+        previous_holdings = {(row[0], row[2]): dict(row) for row in cursor.fetchall()}
+        
+        # Compare quarters to detect activity
+        for (manager_code, ticker), current in current_holdings.items():
+            previous = previous_holdings.get((manager_code, ticker))
+            
+            activity_type = None
+            change_pct = None
+            
+            if not previous:
+                # NEW position
+                activity_type = "BUY"
+                change_pct = 100.0  # New = 100% increase from 0
+            elif current['shares_held'] > previous['shares_held']:
+                # INCREASED position
+                change_pct = ((current['shares_held'] - previous['shares_held']) / previous['shares_held']) * 100
+                if change_pct >= 50:
+                    activity_type = "ADD"  # Significant increase
+            
+            # Generate signal for BUY or ADD
+            if activity_type in ['BUY', 'ADD']:
+                signal = {
+                    'manager_name': current['manager_name'],
+                    'manager_code': current['manager_code'],
+                    'ticker': ticker,
+                    'company_name': current['company_name'],
+                    'activity_type': activity_type,
+                    'current_shares': current['shares_held'],
+                    'previous_shares': previous['shares_held'] if previous else 0,
+                    'change_pct': round(change_pct, 1),
+                    'portfolio_pct': current['portfolio_pct'],
+                    'value_usd': current['value_usd'],
+                    'quarter': current_quarter
+                }
+                signals.append(signal)
+    
+    logger.info(f"Detected {len(signals)} Investment Fund Buy signals ({current_quarter} vs {previous_quarter})")
+    return signals
 
 
 def get_superinvestor_holdings(ticker: str) -> List[Dict]:
@@ -554,7 +713,6 @@ def detect_temporal_convergence(ticker: str, lookback_days: int = 30) -> Optiona
 
 
 if __name__ == "__main__":
-
     # Setup logging
     logging.basicConfig(
         level=logging.INFO,
@@ -569,6 +727,23 @@ if __name__ == "__main__":
     total = scrape_all_superinvestors()
     
     print(f"\nSuccessfully scraped {total} holdings from {len(ELITE_SUPERINVESTORS)} superinvestors")
+    
+    # Detect Investment Fund Buy signals (quarter-over-quarter comparison)
+    print("\n" + "=" * 80)
+    print("DETECTING INVESTMENT FUND BUY SIGNALS (Q-over-Q Analysis)")
+    print("=" * 80)
+    
+    fund_signals = detect_investment_fund_buys(lookback_quarters=2)
+    if fund_signals:
+        print(f"\nFound {len(fund_signals)} INVESTMENT FUND BUY signals:")
+        for signal in fund_signals[:20]:  # Show first 20
+            print(f"\n${signal['ticker']} - {signal['company_name']}")
+            print(f"  Manager: {signal['manager_name']}")
+            print(f"  Activity: {signal['activity_type']} ({signal['change_pct']}% change)")
+            print(f"  Position: {signal['portfolio_pct']}% of portfolio (${signal['value_usd']:,})")
+            print(f"  Shares: {signal['previous_shares']:,} → {signal['current_shares']:,}")
+    else:
+        print("\nNo Investment Fund Buy signals detected (need 2+ quarters of data)")
     
     # Detect Trinity Signals
     print("\n" + "=" * 80)
