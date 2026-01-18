@@ -40,6 +40,14 @@ from tenacity import (
     wait_exponential,
 )
 
+# Import Trinity Signal detection from dataroma_scraper
+try:
+    from dataroma_scraper import detect_trinity_signals as dataroma_detect_trinity, detect_temporal_convergence
+    DATAROMA_AVAILABLE = True
+except ImportError:
+    logger.warning("dataroma_scraper.py not found - Trinity Signals disabled")
+    DATAROMA_AVAILABLE = False
+
 # Load environment variables
 load_dotenv()
 
@@ -75,14 +83,25 @@ USE_TELEGRAM = os.getenv("USE_TELEGRAM", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")  # Comma-separated for multiple accounts
 
-# News API Configuration (optional - for context enrichment)
-USE_NEWS_CONTEXT = os.getenv("USE_NEWS_CONTEXT", "false").lower() == "true"
-NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+# News API Configuration - REMOVED (not needed)
+# USE_NEWS_CONTEXT = os.getenv("USE_NEWS_CONTEXT", "false").lower() == "true"
+# NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+
+# Top Signals Configuration
+TOP_SIGNALS_PER_DAY = int(os.getenv("TOP_SIGNALS_PER_DAY", "3"))  # Only report top N signals
 
 # Congressional Trading (CapitolTrades)
 USE_CAPITOL_TRADES = os.getenv("USE_CAPITOL_TRADES", "true").lower() == "true"
 MIN_CONGRESSIONAL_CLUSTER = int(os.getenv("MIN_CONGRESSIONAL_CLUSTER", "2"))
 CONGRESSIONAL_LOOKBACK_DAYS = int(os.getenv("CONGRESSIONAL_LOOKBACK_DAYS", "30"))
+
+# Elite Congressional Traders - Top 15 proven performers (party irrelevant for filtering)
+ELITE_CONGRESSIONAL_TRADERS = [
+    "Nancy Pelosi", "Josh Gottheimer", "Ro Khanna", "Michael McCaul", 
+    "Tommy Tuberville", "Markwayne Mullin", "Dan Crenshaw", "Brian Higgins",
+    "Richard Blumenthal", "Debbie Wasserman Schultz", "Tom Kean Jr", 
+    "Gil Cisneros", "Cleo Fields", "Marjorie Taylor Greene", "Lisa McClain"
+]
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))
 CLUSTER_DAYS = int(os.getenv("CLUSTER_DAYS", "5"))
@@ -313,6 +332,22 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_ticker ON sent_alerts(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_sent_expires ON sent_alerts(expires_at)")
         
+        # Tracked tickers table (for Telegram bot ticker monitoring feature)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS tracked_tickers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                ticker TEXT NOT NULL,
+                added_date TEXT NOT NULL,
+                UNIQUE(user_id, ticker)
+            )
+        """)
+        
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracked_ticker ON tracked_tickers(ticker)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracked_user ON tracked_tickers(user_id)")
+        
         conn.commit()
     
     logger.info(f"Database initialized at {DB_FILE}")
@@ -523,63 +558,7 @@ def get_company_context(ticker: str) -> Dict[str, any]:
     except Exception as e:
         logger.warning(f"Could not fetch company info for {ticker}: {e}")
     
-    # Get news if enabled
-    if USE_NEWS_CONTEXT and NEWS_API_KEY:
-        try:
-            from newsapi import NewsApiClient
-            
-            newsapi = NewsApiClient(api_key=NEWS_API_KEY)
-            
-            # Get company name for better search
-            company_name = context.get('company_name', ticker)
-            
-            # Search for news mentioning the ticker
-            week_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
-            
-            # Try multiple search queries to catch relevant news
-            all_articles = newsapi.get_everything(
-                q=f'{ticker} OR "{company_name}"',
-                from_param=week_ago,
-                language='en',
-                sort_by='relevancy',
-                page_size=10
-            )
-            
-            # Filter articles that actually mention the ticker symbol
-            articles = []
-            for article in all_articles.get('articles', []):
-                title = article.get('title', '')
-                description = article.get('description', '')
-                content = article.get('content', '')
-                
-                # Check if ticker with $ OR company name appears
-                # This ensures we get actual stock news about the company
-                full_text = f"{title} {description} {content}"
-                
-                # Look for $TICKER (e.g., $ALMS) OR company name (e.g., "Alumis")
-                ticker_upper = ticker.upper()
-                has_dollar_ticker = f"${ticker_upper}" in full_text.upper()
-                has_company_name = company_name.lower() in full_text.lower() if company_name and len(company_name) > 3 else False
-                
-                if has_dollar_ticker or has_company_name:
-                    articles.append({
-                        "title": title,
-                        "description": description or "",
-                        "url": article.get('url', ''),
-                        "published_at": article.get('publishedAt', ''),
-                        "image_url": article.get('urlToImage', '')
-                    })
-                
-                # Limit to 3 most relevant articles
-                if len(articles) >= 3:
-                    break
-            
-            if articles:
-                context["news"] = articles
-                logger.info(f"Fetched {len(articles)} ticker-relevant news articles for {ticker}")
-        
-        except Exception as e:
-            logger.warning(f"Could not fetch news for {ticker}: {e}")
+    # NewsAPI integration removed - not needed for core signal detection
     
     # Get congressional trades
     context["congressional_trades"] = get_congressional_trades(ticker)
@@ -2568,12 +2547,14 @@ def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
 
 def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) -> List[InsiderAlert]:
     """
-    Detect Congressional Cluster Buy: 3+ distinct politicians buy same ticker within 30 days.
+    Detect Elite Congressional Cluster Buy: 2+ Elite traders buy same ticker within 30 days.
     
-    This is a strong signal because:
-    - Multiple politicians with insider info act together
-    - Often indicates upcoming policy/regulatory changes
-    - Bipartisan agreement is especially powerful
+    This is a HIGHLY filtered signal:
+    - ONLY tracks Top 15 proven Elite traders (ignores all other politicians)
+    - Requires 2+ Elite traders buying same stock (any trade size)
+    - Party tracked only for "Bipartisan Elite Cluster" bonus (rare = extremely bullish)
+    
+    Elite traders have demonstrated consistent outperformance and trade with conviction.
     
     Uses published_date (when we found out) for lookback window, not traded_date.
     
@@ -2583,9 +2564,12 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
     alerts = []
     
     try:
-        # Query database directly for cluster buys (last 30 days by published_date)
+        # Query database for Elite trader buys only (last 30 days by published_date)
         with get_db() as conn:
-            query = """
+            # Build SQL filter for Elite traders only
+            elite_filter = " OR ".join([f"politician_name LIKE '%{name}%'" for name in ELITE_CONGRESSIONAL_TRADERS])
+            
+            query = f"""
                 SELECT ticker, COUNT(DISTINCT politician_name) as num_politicians,
                        GROUP_CONCAT(DISTINCT politician_name) as politicians,
                        GROUP_CONCAT(DISTINCT party) as parties,
@@ -2603,12 +2587,12 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 WHERE trade_type = "BUY"
                 AND published_date >= date("now", "-30 days")
                 AND filed_after_days <= ?
+                AND ({elite_filter})
                 GROUP BY ticker
-                HAVING COUNT(DISTINCT politician_name) >= 3
-                AND estimated_total_value >= ?
+                HAVING COUNT(DISTINCT politician_name) >= 2
                 ORDER BY num_politicians DESC
             """
-            cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS, MIN_CONGRESSIONAL_CLUSTER_VALUE))
+            cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
             clusters = cursor.fetchall()
             
             for cluster in clusters:
@@ -2682,7 +2666,8 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                     })
                 trades_df = pd.DataFrame(trades_data)
                 
-                signal_type = "Congressional Cluster Buy"
+                # Signal type: Add "Bipartisan" prefix if both D and R involved (rare = extra bullish)
+                signal_type = "Bipartisan Elite Congressional Cluster" if is_bipartisan else "Elite Congressional Cluster"
                 
                 alert = InsiderAlert(
                     signal_type=signal_type,
@@ -2693,12 +2678,13 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                         "num_politicians": num_politicians,
                         "politicians": politicians[:5],
                         "bipartisan": is_bipartisan,
-                        "issuer_id": first_issuer_id
+                        "issuer_id": first_issuer_id,
+                        "elite_traders": True
                     }
                 )
                 alerts.append(alert)
         
-        logger.info(f"Detected {len(alerts)} Congressional cluster buy signals")
+        logger.info(f"Detected {len(alerts)} Elite Congressional cluster buy signals (2+ Elite traders)")
     except Exception as e:
         logger.error(f"Error detecting Congressional cluster buys: {e}", exc_info=True)
     
@@ -2707,11 +2693,14 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
 
 def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> List[InsiderAlert]:
     """
-    Detect Large Congressional Buy: Single politician with purchase >$100K in last 7 days.
+    Detect Elite Large Congressional Buy: Elite trader purchases $100K+ in last 30 days.
     
-    Triggers when:
-    - Purchase size ≥$100K (size_range: 100K–250K, 250K–500K, 500K–1M, 1M–5M, etc.)
-    - Published within last 7 days
+    HIGHLY filtered signal:
+    - ONLY tracks Top 15 proven Elite traders (ignores all other politicians)
+    - Minimum $100K purchase size (100K-250K, 250K-500K, 500K-1M, 1M-5M, etc.)
+    - Published within last 30 days
+    
+    Party is tracked for display but irrelevant for filtering (smart trades = smart trades).
     
     Uses published_date (when disclosed) for lookback window, not traded_date.
     
@@ -2721,7 +2710,10 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
     alerts = []
     
     try:
-        # Query database for large buys (last 7 days by published_date, size ≥$100K)
+        # Build SQL filter for Elite traders only
+        elite_filter = " OR ".join([f"politician_name LIKE '%{name}%'" for name in ELITE_CONGRESSIONAL_TRADERS])
+        
+        # Query database for Elite large buys (last 30 days by published_date, size ≥$100K)
         with get_db() as conn:
             # Check if issuer_id column exists (for backward compatibility)
             cursor_info = conn.execute("PRAGMA table_info(congressional_trades)")
@@ -2729,7 +2721,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
             has_issuer_id = 'issuer_id' in columns
             
             if has_issuer_id:
-                query = """
+                query = f"""
                     SELECT politician_name, politician_id, party, chamber, state,
                            ticker, company_name, size_range, price,
                            traded_date, published_date, filed_after_days, issuer_id
@@ -2737,14 +2729,15 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                     WHERE trade_type = "BUY"
                     AND published_date >= date("now", "-30 days")
                     AND filed_after_days <= ?
-                    AND (size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
+                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
                          OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
                          OR size_range LIKE '%25M%' OR size_range LIKE '>%')
+                    AND ({elite_filter})
                     ORDER BY published_date DESC
                 """
                 cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
             else:
-                query = """
+                query = f"""
                     SELECT politician_name, politician_id, party, chamber, state,
                            ticker, company_name, size_range, price,
                            traded_date, published_date, filed_after_days
@@ -2752,9 +2745,10 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                     WHERE trade_type = "BUY"
                     AND published_date >= date("now", "-30 days")
                     AND filed_after_days <= ?
-                    AND (size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
+                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
                          OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
                          OR size_range LIKE '%25M%' OR size_range LIKE '>%')
+                    AND ({elite_filter})
                     ORDER BY published_date DESC
                 """
                 cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
@@ -2791,7 +2785,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                         pass
                 
                 alert = InsiderAlert(
-                    signal_type="Large Congressional Buy",
+                    signal_type="Elite Congressional Buy",
                     ticker=ticker,
                     company_name=trade['company_name'] or ticker,
                     trades=trades_df,
@@ -2801,14 +2795,89 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                         "party": trade['party'],
                         "size": trade['size_range'],
                         "published_date": trade['published_date'],
-                        "issuer_id": issuer_id_val
+                        "issuer_id": issuer_id_val,
+                        "elite_trader": True
                     }
                 )
                 alerts.append(alert)
         
-        logger.info(f"Detected {len(alerts)} large Congressional buy signals")
+        logger.info(f"Detected {len(alerts)} Elite Congressional buy signals ($100K+, Elite traders only)")
     except Exception as e:
         logger.error(f"Error detecting large Congressional buys: {e}", exc_info=True)
+    
+    return alerts
+
+
+def detect_trinity_signal_alerts() -> List[InsiderAlert]:
+    """
+    Detect Trinity Signals: Corporate Insider + Elite Congressional + Superinvestor convergence.
+    
+    Returns list of InsiderAlert objects with temporal correlation analysis.
+    """
+    alerts = []
+    
+    try:
+        # Get raw Trinity signals from dataroma_scraper
+        trinity_signals = dataroma_detect_trinity()
+        
+        if not trinity_signals:
+            logger.info("No Trinity Signals detected")
+            return alerts
+        
+        logger.info(f"Found {len(trinity_signals)} raw Trinity convergences")
+        
+        # Enrich each signal with temporal correlation analysis
+        for signal in trinity_signals:
+            ticker = signal['ticker']
+            
+            # Get temporal convergence analysis
+            temporal = detect_temporal_convergence(ticker, lookback_days=30)
+            
+            if not temporal:
+                continue  # Skip if temporal analysis fails
+            
+            # Create synthetic DataFrame for alert (Trinity signals don't have traditional "trades")
+            trades_df = pd.DataFrame([{
+                'Ticker': ticker,
+                'Company Name': ticker,  # Will be enriched later
+                'Insider Name': f"{signal['insider_count']} Corporate Insiders",
+                'Title': 'Trinity Signal',
+                'Trans': 'P',
+                'Value ($)': signal.get('insider_value', 0),
+                'Trade Date': temporal['earliest_date']
+            }])
+            
+            # Build details dict with full temporal context
+            details = {
+                'signal_type': 'Trinity Signal',
+                'convergence_score': temporal['convergence_score'],
+                'temporal_pattern': temporal['pattern'],
+                'window_days': temporal['window_days'],
+                'timeline': temporal['timeline'],
+                'insider_count': signal['insider_count'],
+                'insider_value': signal.get('insider_value', 0),
+                'congressional_count': signal['congressional_count'],
+                'politicians': signal.get('politicians', ''),
+                'superinvestor_count': signal['superinvestor_count'],
+                'managers': signal.get('managers', ''),
+                'insider_details': temporal.get('insider_details', []),
+                'congressional_details': temporal.get('congressional_details', []),
+                'superinvestor_details': temporal.get('superinvestor_details', [])
+            }
+            
+            alert = InsiderAlert(
+                signal_type="Trinity Signal",
+                ticker=ticker,
+                company_name=ticker,  # Will be enriched
+                trades=trades_df,
+                details=details
+            )
+            alerts.append(alert)
+        
+        logger.info(f"Created {len(alerts)} Trinity Signal alerts with temporal correlation")
+        
+    except Exception as e:
+        logger.error(f"Error creating Trinity Signal alerts: {e}", exc_info=True)
     
     return alerts
 
@@ -2847,6 +2916,15 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
         except Exception as e:
             logger.error(f"Error detecting Congressional signals: {e}", exc_info=True)
     
+    # Trinity Signals (if Dataroma integration enabled)
+    if DATAROMA_AVAILABLE:
+        try:
+            logger.info("Detecting Trinity Signals (Corporate + Congressional + Superinvestor convergence)")
+            trinity_alerts = detect_trinity_signal_alerts()
+            all_alerts.extend(trinity_alerts)
+        except Exception as e:
+            logger.error(f"Error detecting Trinity signals: {e}", exc_info=True)
+    
     logger.info(f"Total signals detected before deduplication: {len(all_alerts)}")
     
     # Deduplicate: If same ticker+insider triggers multiple signals, keep only highest priority
@@ -2862,14 +2940,15 @@ def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
     Keeps only the highest-priority signal per ticker+insider combination.
     
     Priority order (highest to lowest):
-    1. Congressional Cluster Buy
-    2. Large Congressional Buy  
-    3. Corporation Purchase
-    4. Cluster Buying
-    5. C-Suite Buy
-    6. Large Single Buy
-    7. Bearish Cluster Selling
-    8. Strategic Investor Buy
+    1. Trinity Signal (NEW - highest conviction)
+    2. Congressional Cluster Buy
+    3. Large Congressional Buy  
+    4. Corporation Purchase
+    5. Cluster Buying
+    6. C-Suite Buy
+    7. Large Single Buy
+    8. Bearish Cluster Selling
+    9. Strategic Investor Buy
     
     Args:
         alerts: List of InsiderAlert objects
@@ -2947,6 +3026,222 @@ def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
         logger.info(f"Removed {removed_count} duplicate signals (same ticker+insider, lower priority)")
     
     return deduplicated
+
+
+def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict] = None) -> float:
+    """
+    Calculate composite score for signal ranking using multi-factor analysis.
+    
+    Scoring Factors:
+    1. Signal Type Hierarchy (0-10 points)
+       - Trinity Signal: 10
+       - Elite Congressional Cluster: 9
+       - Elite Congressional Buy: 8
+       - Cluster Buying: 7
+       - Corporation Purchase: 7
+       - C-Suite Buy: 6
+       - Large Single Buy: 5
+       - Strategic Investor: 5
+       - Bearish Selling: 3
+    
+    2. Temporal Convergence Bonus (0-3 points)
+       - Sequential pattern (Congress → Insider → Fund): +3
+       - Tight window (<14 days): +2
+       - Concurrent buying: +1
+    
+    3. Dollar Value Score (0-3 points)
+       - $5M+: 3
+       - $1M-$5M: 2
+       - $500K-$1M: 1.5
+       - $100K-$500K: 1
+       - <$100K: 0.5
+    
+    4. Insider Seniority Bonus (0-2 points)
+       - CEO/CFO/COO: +2
+       - VP/Director: +1
+       - Other: +0.5
+    
+    5. Market Cap Multiplier (0.8-1.2x)
+       - Small cap (<$2B): 1.2x (higher beta, more impact)
+       - Mid cap ($2B-$10B): 1.1x
+       - Large cap ($10B-$100B): 1.0x
+       - Mega cap (>$100B): 0.9x (harder to move)
+    
+    6. Short Interest Adjustment (-2 to +1)
+       - <5%: 0 (neutral)
+       - 5-15%: +1 (potential squeeze)
+       - 15-30%: 0 (risky)
+       - >30%: -2 (very risky)
+    
+    7. Bipartisan Bonus (0-1 points)
+       - Bipartisan Congressional: +1
+    
+    Returns:
+        Float score (typically 5-20 range, higher = stronger signal)
+    """
+    score = 0.0
+    
+    # 1. Signal Type Hierarchy
+    signal_type_scores = {
+        'Trinity Signal': 10,
+        'Elite Congressional Cluster': 9,
+        'Bipartisan Elite Congressional Cluster': 9.5,
+        'Elite Congressional Buy': 8,
+        'Cluster Buying': 7,
+        'Corporation Purchase': 5,                     # Reduced from 7 - still significant but not dominating
+        'C-Suite Buy': 6,
+        'Large Single Buy': 5,
+        'Strategic Investor Buy': 5,
+        'Bearish Cluster Selling': 3,
+        'Congressional Cluster Buy': 8,  # Legacy name
+        'Large Congressional Buy': 7     # Legacy name
+    }
+    score += signal_type_scores.get(alert.signal_type, 4)
+    
+    # 2. Temporal Convergence Bonus (for Trinity Signals)
+    if alert.signal_type == 'Trinity Signal' and alert.details:
+        convergence_score = alert.details.get('convergence_score', 0)
+        pattern = alert.details.get('temporal_pattern', '')
+        
+        if 'SEQUENTIAL (Ideal)' in pattern:
+            score += 3
+        elif 'TIGHT' in pattern:
+            score += 2
+        else:
+            score += 1
+        
+        # Additional bonus for high convergence score
+        if convergence_score >= 9:
+            score += 1
+    
+    # 3. Dollar Value Score
+    total_value = 0
+    if not alert.trades.empty and 'Value ($)' in alert.trades.columns:
+        total_value = alert.trades['Value ($)'].sum()
+    elif alert.details and 'total_value' in alert.details:
+        total_value = alert.details['total_value']
+    elif alert.details and 'insider_value' in alert.details:
+        total_value = alert.details['insider_value']
+    
+    if total_value >= 5_000_000:
+        score += 3
+    elif total_value >= 1_000_000:
+        score += 2
+    elif total_value >= 500_000:
+        score += 1.5
+    elif total_value >= 100_000:
+        score += 1
+    else:
+        score += 0.5
+    
+    # 4. Insider Seniority Bonus
+    if not alert.trades.empty and 'Title' in alert.trades.columns:
+        titles = alert.trades['Title'].str.upper().tolist()
+        if any(title in str(t) for t in titles for title in ['CEO', 'CFO', 'COO', 'CHIEF']):
+            score += 2
+        elif any(title in str(t) for t in titles for title in ['VP', 'DIRECTOR', 'PRESIDENT']):
+            score += 1
+        else:
+            score += 0.5
+    
+    # 5. Market Cap Multiplier (applied if context available)
+    if context and 'market_cap' in context:
+        market_cap = context['market_cap']
+        if market_cap < 2_000_000_000:  # <$2B
+            score *= 1.2
+        elif market_cap < 10_000_000_000:  # $2B-$10B
+            score *= 1.1
+        elif market_cap > 100_000_000_000:  # >$100B
+            score *= 0.9
+        # Else 1.0x (no change)
+    
+    # 6. Short Interest Adjustment
+    if context and 'short_interest' in context:
+        short_pct = context.get('short_interest', 0)
+        if short_pct is not None:
+            if 5 <= short_pct < 15:
+                score += 1  # Potential squeeze
+            elif short_pct > 30:
+                score -= 2  # Very risky
+    
+    # 7. Bipartisan Bonus
+    if 'Bipartisan' in alert.signal_type:
+        score += 1
+    elif alert.details and alert.details.get('bipartisan'):
+        score += 1
+    
+    return round(score, 2)
+
+
+def select_top_signals(
+    alerts: List[InsiderAlert],
+    top_n: int = 3,
+    enrich_context: bool = True
+) -> List[InsiderAlert]:
+    """
+    Select top N signals based on composite scoring algorithm.
+    
+    Process:
+    1. Calculate composite score for each signal
+    2. Optionally enrich with market context (for market cap / short interest factors)
+    3. Sort by score (descending)
+    4. Return top N
+    
+    Args:
+        alerts: List of InsiderAlert objects
+        top_n: Number of top signals to return
+        enrich_context: Whether to fetch market data for scoring (slower but more accurate)
+    
+    Returns:
+        List of top N InsiderAlert objects, sorted by score
+    """
+    if not alerts:
+        return alerts
+    
+    if len(alerts) <= top_n:
+        logger.info(f"Only {len(alerts)} signals detected (≤ top_n={top_n}), returning all")
+        return alerts
+    
+    logger.info(f"Scoring {len(alerts)} signals to select top {top_n}...")
+    
+    # Calculate scores with optional context enrichment
+    scored_alerts = []
+    for alert in alerts:
+        context = None
+        
+        if enrich_context:
+            try:
+                # Get basic market context for scoring (lightweight version)
+                context = get_company_context(alert.ticker)
+            except Exception as e:
+                logger.warning(f"Could not get context for {alert.ticker}: {e}")
+        
+        score = calculate_composite_signal_score(alert, context)
+        scored_alerts.append((score, alert))
+        
+        logger.debug(f"{alert.ticker} ({alert.signal_type}): score={score}")
+    
+    # Sort by score (descending)
+    scored_alerts.sort(key=lambda x: x[0], reverse=True)
+    
+    # Log scoring results
+    logger.info("=" * 60)
+    logger.info("COMPOSITE SCORING RESULTS")
+    logger.info("=" * 60)
+    for i, (score, alert) in enumerate(scored_alerts[:top_n], 1):
+        logger.info(f"{i}. {alert.ticker} - {alert.signal_type}: {score} points")
+    
+    if len(scored_alerts) > top_n:
+        logger.info("")
+        logger.info(f"Filtered out {len(scored_alerts) - top_n} lower-scoring signals:")
+        for i, (score, alert) in enumerate(scored_alerts[top_n:], top_n + 1):
+            logger.info(f"{i}. {alert.ticker} - {alert.signal_type}: {score} points")
+    
+    logger.info("=" * 60)
+    
+    # Return top N alerts
+    top_alerts = [alert for _, alert in scored_alerts[:top_n]]
+    return top_alerts
 
 
 # State file functions removed - using database-only deduplication
@@ -3179,18 +3474,26 @@ def format_email_html(alert: InsiderAlert) -> str:
                 traded_date = "N/A"
             
             # Filing Date (Published Date for corporate insiders)
-            if pd.notna(row.get("Filing Date")):
-                fd = row["Filing Date"]
-                day_suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(fd.day if fd.day < 20 else fd.day % 10, 'th')
-                published_date = f"{fd.day}{day_suffix} {fd.strftime('%b %Y')}"
-                
-                # Calculate Days Past
-                if pd.notna(row.get(date_col)):
-                    days_diff = (fd - row[date_col]).days
-                    filed_after = str(days_diff)
-                else:
+            # Check if Filing Date column exists and has data
+            if "Filing Date" in row and pd.notna(row.get("Filing Date")):
+                try:
+                    fd = pd.to_datetime(row["Filing Date"])
+                    day_suffix = {1: 'st', 2: 'nd', 3: 'rd'}.get(fd.day if fd.day < 20 else fd.day % 10, 'th')
+                    published_date = f"{fd.day}{day_suffix} {fd.strftime('%b %Y')}"
+                    
+                    # Calculate Days Past
+                    if pd.notna(row.get(date_col)):
+                        trade_dt = pd.to_datetime(row[date_col])
+                        days_diff = (fd - trade_dt).days
+                        filed_after = str(days_diff)
+                    else:
+                        filed_after = "—"
+                except Exception as e:
+                    logger.debug(f"Could not parse Filing Date: {e}")
+                    published_date = "—"
                     filed_after = "—"
             else:
+                # No Filing Date available for this corporate insider trade
                 published_date = "—"
                 filed_after = "—"
         
@@ -3517,26 +3820,8 @@ def format_email_html(alert: InsiderAlert) -> str:
                     html += f'<div style="color:#7f8c8d; font-size:0.85em; margin-top:4px;">{pub_date}</div>'
                 html += '</div>'
         
-        # AI Insight section
+        # Confidence score display (AI insights removed)
         confidence_score, score_reason = calculate_confidence_score(alert, context)
-        ai_insight = generate_ai_insight(alert, context, confidence_score)
-        # Format AI insight with line breaks and bold labels for readability
-        formatted_insight = ai_insight
-        # Add line breaks BEFORE section headers for better spacing
-        formatted_insight = formatted_insight.replace("CATALYSTS:", "<br><br>CATALYSTS:")
-        formatted_insight = formatted_insight.replace("RISKS:", "<br><br>RISKS:")
-        formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<br><br>RECOMMENDATION:")
-        # Bold the section labels and add break after
-        formatted_insight = formatted_insight.replace("KEY INSIGHT:", "<strong>KEY INSIGHT:</strong><br>")
-        formatted_insight = formatted_insight.replace("CATALYSTS:", "<strong>CATALYSTS:</strong><br>")
-        formatted_insight = formatted_insight.replace("RISKS:", "<strong>RISKS:</strong><br>")
-        formatted_insight = formatted_insight.replace("RECOMMENDATION:", "<strong>RECOMMENDATION:</strong><br>")
-        # Underline action keywords instead of bolding
-        formatted_insight = formatted_insight.replace("STRONG BUY", "<u>STRONG BUY</u>")
-        formatted_insight = formatted_insight.replace(" BUY ", " <u>BUY</u> ")
-        formatted_insight = formatted_insight.replace(" SELL ", " <u>SELL</u> ")
-        formatted_insight = formatted_insight.replace(" HOLD", " <u>HOLD</u>")
-        formatted_insight = formatted_insight.replace(" WAIT", " <u>WAIT</u>")
         html += f"""
             <div class="ai-insight">
                 <h2 style="margin-top:0;">🧠 AI Insight</h2>
@@ -3888,49 +4173,7 @@ def format_telegram_message(alert: InsiderAlert) -> str:
     # Add company context if available
     try:
         context = get_company_context(alert.ticker)
-        
-        # AI-Powered Insight - extract only RECOMMENDATION section
-        confidence_score, score_reason = calculate_confidence_score(alert, context)
-        ai_insight = generate_ai_insight(alert, context, confidence_score)
-        
-        # Remove HTML tags
-        ai_insight = ai_insight.replace('<br>', ' ').replace('<strong>', '').replace('</strong>', '')
-        
-        # Extract only RECOMMENDATION section
-        if 'RECOMMENDATION' in ai_insight:
-            # Get text after RECOMMENDATION: (including the colon)
-            parts = ai_insight.split('RECOMMENDATION')
-            if len(parts) > 1:
-                recommendation = parts[1].strip()
-                # Remove leading colon and whitespace
-                if recommendation.startswith(':'):
-                    recommendation = recommendation[1:].strip()
-                # Take only first paragraph (stop at double newline or end)
-                if '\n\n' in recommendation:
-                    recommendation = recommendation.split('\n\n')[0].strip()
-                # No character limit - AI is instructed to keep under 75 words
-                if recommendation:
-                    msg += f"\n💡 *AI Insight:*\n{escape_md(recommendation)}\n"
-        else:
-            # Fallback: show first key insight or paragraph
-            if 'KEY INSIGHT' in ai_insight:
-                parts = ai_insight.split('KEY INSIGHT')
-                if len(parts) > 1:
-                    insight = parts[1].strip()
-                    if insight.startswith(':'):
-                        insight = insight[1:].strip()
-                    # Take first paragraph
-                    if '\n\n' in insight:
-                        insight = insight.split('\n\n')[0].strip()
-                    # No character limit - use what AI provides
-                    if insight:
-                        msg += f"\n💡 *AI Insight:*\n{escape_md(insight)}\n"
-            else:
-                # Last resort: show first paragraph of whatever we have
-                first_para = ai_insight.split('\n\n')[0].strip() if '\n\n' in ai_insight else ai_insight.strip()
-                if first_para:
-                    msg += f"\n💡 *AI Insight:*\n{escape_md(first_para)}\n"
-    
+        # Context fetched for internal use, no AI insights displayed
     except Exception as e:
         logger.warning(f"Could not add context to message: {e}")
     
@@ -4076,16 +4319,25 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         text += f"{score_reason}\n"
         
         text += "\n" + "=" * 70 + "\n"
-        text += "AI INSIGHT:\n"
-        text += "=" * 70 + "\n"
-        ai_insight = generate_ai_insight(alert, context, confidence_score)
-        text += f"{ai_insight}\n"
+        # AI insights removed - cleaner signal reporting
         
     except Exception as e:
         logger.warning(f"Could not add context to text email: {e}")
     
     text += "\n" + "=" * 70 + "\n"
-    text += f"View on OpenInsider: http://openinsider.com/search?q={alert.ticker}\n"
+    # Build filtered OpenInsider link with date range (same as Telegram)
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}"
+    if not alert.trades.empty and "Trade Date" in alert.trades.columns:
+        trade_dates = alert.trades["Trade Date"].dropna().tolist()
+        if trade_dates:
+            try:
+                min_date = pd.to_datetime(min(trade_dates))
+                max_date = pd.to_datetime(max(trade_dates))
+                date_range = f"{min_date.strftime('%m')}%2F{min_date.strftime('%d')}%2F{min_date.strftime('%Y')}+-+{max_date.strftime('%m')}%2F{max_date.strftime('%d')}%2F{max_date.strftime('%Y')}"
+                oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+            except:
+                pass
+    text += f"View on OpenInsider: {oi_link}\n"
     text += f"\nAlert ID: {alert.alert_id[:16]}...\n"
     text += "\nALPHA WHISPERER - Insider Trading Intelligence\n"
     
@@ -4562,6 +4814,235 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
         return False
 
 
+def send_signal_summary_email(alerts: List[InsiderAlert]) -> bool:
+    """
+    Send summary email showing ALL detected signals with their composite scores
+    before filtering to top N. This allows user to verify the ranking algorithm.
+    
+    Args:
+        alerts: List of ALL InsiderAlert objects before filtering
+        
+    Returns:
+        True if email sent successfully
+    """
+    if not alerts:
+        logger.info("No signals to summarize")
+        return False
+    
+    logger.info(f"Sending pre-filter signal summary email for {len(alerts)} signals...")
+    
+    # Calculate scores for all alerts
+    scored_alerts = []
+    for alert in alerts:
+        try:
+            context = get_company_context(alert.ticker)
+        except:
+            context = None
+        
+        score = calculate_composite_signal_score(alert, context)
+        scored_alerts.append((score, alert))
+    
+    # Sort by score descending
+    scored_alerts.sort(key=lambda x: x[0], reverse=True)
+    
+    # Build email body
+    subject = f"[Insider Whisper] Signal Summary - {len(alerts)} Detected"
+    
+    # HTML body
+    html_body = f"""
+    <html>
+    <head>
+        <style>
+            body {{ 
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+                line-height: 1.6;
+                color: #333;
+                background-color: #f5f5f5;
+                padding: 20px;
+            }}
+            .container {{
+                background-color: white;
+                border-radius: 8px;
+                padding: 30px;
+                max-width: 900px;
+                margin: 0 auto;
+                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            }}
+            h1 {{
+                color: #2c3e50;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 10px;
+                margin-top: 0;
+            }}
+            .summary {{
+                background: #e8f4f8;
+                padding: 15px;
+                border-radius: 5px;
+                margin: 20px 0;
+            }}
+            .signal {{
+                background: #f9f9f9;
+                border-left: 4px solid #3498db;
+                padding: 15px;
+                margin: 15px 0;
+                border-radius: 3px;
+            }}
+            .top3 {{
+                border-left: 4px solid #27ae60;
+                background: #e8f8f0;
+            }}
+            .signal-header {{
+                font-weight: bold;
+                font-size: 1.1em;
+                color: #2c3e50;
+                margin-bottom: 8px;
+            }}
+            .score {{
+                font-weight: bold;
+                color: #e74c3c;
+                font-size: 1.2em;
+            }}
+            .score.high {{
+                color: #27ae60;
+            }}
+            .details {{
+                color: #555;
+                font-size: 0.95em;
+                margin-top: 5px;
+            }}
+            .footer {{
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 2px solid #eee;
+                color: #777;
+                font-size: 0.9em;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Signal Detection Summary</h1>
+            
+            <div class="summary">
+                <strong>Total Signals Detected:</strong> {len(alerts)}<br>
+                <strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
+                <strong>Top Signals Selected:</strong> Top 3 (highlighted in green)
+            </div>
+            
+            <h2>All Signals Ranked by Composite Score:</h2>
+    """
+    
+    # Add each signal
+    for i, (score, alert) in enumerate(scored_alerts, 1):
+        is_top3 = i <= 3
+        signal_class = "signal top3" if is_top3 else "signal"
+        score_class = "score high" if score >= 15 else "score"
+        
+        # Get total value
+        total_value = 0
+        if not alert.trades.empty and 'Value ($)' in alert.trades.columns:
+            total_value = alert.trades['Value ($)'].sum()
+        elif alert.details and 'total_value' in alert.details:
+            total_value = alert.details['total_value']
+        
+        value_str = f"${total_value:,.0f}" if total_value > 0 else "N/A"
+        
+        # Get insider count
+        insider_count = len(alert.trades) if not alert.trades.empty else 1
+        if alert.details and 'insider_count' in alert.details:
+            insider_count = alert.details['insider_count']
+        
+        rank_emoji = "🏆" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else ""
+        
+        html_body += f"""
+            <div class="{signal_class}">
+                <div class="signal-header">
+                    {rank_emoji} #{i} - ${alert.ticker} - {alert.signal_type}
+                </div>
+                <div class="{score_class}">Composite Score: {score} points</div>
+                <div class="details">
+                    Value: {value_str} | Participants: {insider_count} | 
+                    {'✅ SELECTED FOR REPORTING' if is_top3 else '❌ Filtered Out'}
+                </div>
+            </div>
+        """
+    
+    html_body += """
+            <div class="footer">
+                <strong>Next Step:</strong> The top 3 signals will be sent in separate detailed alert emails.<br>
+                <strong>Note:</strong> This summary helps you verify the ranking algorithm is selecting the strongest signals.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    # Plain text version
+    text_body = f"""
+SIGNAL DETECTION SUMMARY
+{'='*80}
+
+Total Signals Detected: {len(alerts)}
+Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Top Signals Selected: Top 3
+
+ALL SIGNALS RANKED BY COMPOSITE SCORE:
+{'='*80}
+
+"""
+    
+    for i, (score, alert) in enumerate(scored_alerts, 1):
+        is_top3 = i <= 3
+        status = "✅ SELECTED" if is_top3 else "❌ FILTERED"
+        
+        total_value = 0
+        if not alert.trades.empty and 'Value ($)' in alert.trades.columns:
+            total_value = alert.trades['Value ($)'].sum()
+        elif alert.details and 'total_value' in alert.details:
+            total_value = alert.details['total_value']
+        
+        value_str = f"${total_value:,.0f}" if total_value > 0 else "N/A"
+        
+        text_body += f"""
+#{i} - ${alert.ticker} - {alert.signal_type}
+    Composite Score: {score} points
+    Value: {value_str}
+    Status: {status}
+
+"""
+    
+    text_body += """
+{'='*80}
+Next Step: The top 3 signals will be sent in separate detailed alert emails.
+"""
+    
+    try:
+        # Create message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_TO
+        
+        # Attach both versions
+        part1 = MIMEText(text_body, "plain")
+        part2 = MIMEText(html_body, "html")
+        msg.attach(part1)
+        msg.attach(part2)
+        
+        # Send email
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+        
+        logger.info(f"Signal summary email sent successfully: {len(alerts)} signals")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to send signal summary email: {e}")
+        return False
+
+
 def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix: str = "") -> bool:
     """
     Send email alert for detected signal.
@@ -4655,10 +5136,9 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
         else:
             regular_alerts.append(alert)
     
-    # Cap regular signals at 3 (top signals by priority)
-    MAX_REGULAR_SIGNALS = 3
-    if len(regular_alerts) > MAX_REGULAR_SIGNALS:
-        logger.info(f"Capping regular signals from {len(regular_alerts)} to {MAX_REGULAR_SIGNALS}")
+    # Cap regular signals using TOP_SIGNALS_PER_DAY configuration (currently set to 1)
+    if TOP_SIGNALS_PER_DAY > 0 and len(regular_alerts) > TOP_SIGNALS_PER_DAY:
+        logger.info(f"Capping regular signals from {len(regular_alerts)} to {TOP_SIGNALS_PER_DAY}")
         
         # Smart prioritization based on signal strength
         # Score each alert based on multiple factors
@@ -4829,7 +5309,7 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
         
         # Sort by priority score (highest first)
         regular_alerts.sort(key=lambda a: calculate_priority_score(a), reverse=True)
-        regular_alerts = regular_alerts[:MAX_REGULAR_SIGNALS]
+        regular_alerts = regular_alerts[:TOP_SIGNALS_PER_DAY]
     
     # Count ALL signals by type for intro message (not just top 3)
     signal_counts = {}
@@ -4969,6 +5449,19 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
             count = signal_counts[signal_type]
             logger.info(f"  {signal_type}: {count}")
         logger.info("=" * 60)
+        
+        # Apply Top-N signal filter (select only highest-scoring signals)
+        if TOP_SIGNALS_PER_DAY > 0 and len(alerts) > TOP_SIGNALS_PER_DAY:
+            logger.info(f"\nApplying Top-{TOP_SIGNALS_PER_DAY} filter to select strongest signals...")
+            
+            # Send pre-filter summary email showing ALL signals and their scores
+            if not dry_run:
+                send_signal_summary_email(alerts)
+            
+            # Apply the filter
+            filtered_alerts = select_top_signals(alerts, top_n=TOP_SIGNALS_PER_DAY, enrich_context=True)
+            logger.info(f"Filtered to top {len(filtered_alerts)} signals for reporting\n")
+            alerts = filtered_alerts
         
         # Process alerts (pass tracked ticker activity for sending with signals)
         process_alerts(alerts, dry_run=dry_run, tracked_ticker_activity=tracked_ticker_activity, test_mode=test_mode)
