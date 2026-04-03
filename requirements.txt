@@ -10,3 +10,4 @@ yfinance>=0.2.0
 newsapi-python>=0.2.7
 selenium>=4.15.0
 webdriver-manager>=4.0.0
+openai>=1.0.0

@@ -1,5 +1,16 @@
 # InvestorAI - Complete Algorithm Architecture & Logic Flow
 
+## 🔄 Recent Changes (v1.1)
+
+- **AI Insights (GPT-4o-mini)**: `generate_ai_insight()` now tries GitHub Models API (free via `GITHUB_TOKEN`) before falling back to Ollama, then rule-based analysis. Requires `openai` package and `GITHUB_TOKEN` env var.
+- **Insider Alpha Calibration**: New `calculate_insider_alpha_score()` function queries the insider's historical trades from DB (buy count, unique tickers, avg value, buy-to-sell ratio, repeat conviction). Applied as Factor 8 (0.8x-1.5x multiplier) in `calculate_composite_signal_score()`.
+- **Streamlined Telegram Format**: `format_telegram_message()` now receives composite score, confidence, and AI insight. Shows score bar (🟩/⬜), "WHY THIS MATTERS" AI section, condensed trade summary (3 trades max), and clean links.
+- **Tracked Ticker Dedup**: `detect_tracked_ticker_activity()` generates per-trade dedup IDs and filters via `is_alert_already_sent()`. Prevents repeating the same tracked ticker trades across runs.
+- **Removed Noise**: Summary email call removed from `run_once()`. Intro signal-count message removed from `process_alerts()`. Only top trade + tracked tickers are sent.
+- **Fixed Links**: All OpenInsider URLs use simple 30-day screener (`fd=30`) instead of brittle date-range encoding that caused 404s. Capitol Trades links use issuer-based URLs when available.
+
+---
+
 ## 🎯 Project Vision
 
 InvestorAI is an intelligent trading alert system that tracks insider trading activity from three independent sources: corporate insiders (CEOs, CFOs, Directors), Congressional members (Senate & House), and elite superinvestors (hedge funds filing 13Fs). It automatically detects high-conviction buying patterns, analyzes temporal convergence, ranks signals using composite scoring, and delivers ONLY the top 3 strongest signals daily via Telegram and email.

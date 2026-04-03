@@ -1258,8 +1258,9 @@ def get_insider_role_description(title: str) -> str:
 
 def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> str:
     """
-    Generate AI-powered insight using local Llama 3 via Ollama.
-    Falls back to rule-based analysis if Ollama is unavailable.
+    Generate AI-powered insight using GitHub Models (GPT-4o-mini), Ollama, or rule-based fallback.
+    
+    Priority: GitHub Models API → Ollama local → Rule-based analysis
     
     Args:
         alert: InsiderAlert object
@@ -1269,88 +1270,84 @@ def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> 
     Returns:
         Detailed insight string with analysis and recommendation
     """
-    try:
-        import requests
-        
-        # Build context for LLM
-        prompt = f"""You are a senior hedge fund analyst with 15+ years experience. Analyze this insider trading signal with professional precision. DO NOT explain what the signal type means - I already know. Focus on NON-OBVIOUS insights, catalysts, and edge.
+    # Build context prompt (shared by both LLM backends)
+    prompt = f"""You are a senior hedge fund analyst. Analyze this insider trading signal. Focus on NON-OBVIOUS insights and actionable edge. Be skeptical - insider buying alone doesn't guarantee success.
 
 SIGNAL: {alert.signal_type}
 TICKER: {alert.ticker} ({alert.company_name})
 CONFIDENCE: {confidence}/5
 
 MARKET DATA:"""
-        
-        # Add relevant context
-        if context.get("sector"):
-            prompt += f"\n• Sector: {context['sector']}"
-        if context.get("market_cap"):
-            mc_billions = context["market_cap"] / 1e9
-            prompt += f"\n• Market Cap: ${mc_billions:.1f}B"
-        if context.get("price_change_5d"):
-            prompt += f"\n• 5D: {context['price_change_5d']:+.1f}%"
-        if context.get("price_change_1m"):
-            prompt += f"\n• 1M: {context['price_change_1m']:+.1f}%"
-        if context.get("short_interest"):
-            si = context['short_interest']*100
-            prompt += f"\n• Short Interest: {si:.1f}%" + (" (SQUEEZE RISK!)" if si > 15 else "")
-        if context.get("pe_ratio"):
-            pe = context['pe_ratio']
-            pe_note = " (undervalued)" if pe < 15 else " (expensive)" if pe > 30 else ""
-            prompt += f"\n• P/E: {pe:.1f}{pe_note}"
-        if context.get("distance_from_52w_low"):
-            prompt += f"\n• From 52W Low: +{context['distance_from_52w_low']:.1f}%"
-        
-        # Congressional alignment - highlight proven track record
-        congressional_trades = context.get("congressional_trades", [])
-        ticker = alert.ticker
-        congressional_buys = [
-            t for t in congressional_trades 
-            if t.get("type", "").upper() in ["BUY", "PURCHASE"] 
-            and t.get("ticker", "").upper() == ticker.upper()
-        ]
-        if congressional_buys:
-            politicians = [t.get('politician', 'Unknown') for t in congressional_buys[:2]]
-            prompt += f"\n• 🏛️ **CONGRESSIONAL ALIGNMENT**: {len(congressional_buys)} politicians with proven track records buying ({', '.join(politicians)})"
-            prompt += "\n  NOTE: These are HIGH-CONVICTION traders who consistently outperform the market"
-        
-        # Signal-specific details
-        if "num_insiders" in alert.details:
-            prompt += f"\n• {alert.details['num_insiders']} insiders buying simultaneously"
-            if "total_value" in alert.details:
-                prompt += f" (${alert.details['total_value']:,.0f} total)"
-        if "num_politicians" in alert.details:
-            prompt += f"\n• {alert.details['num_politicians']} politicians"
-            if alert.details.get("bipartisan"):
-                prompt += " (BIPARTISAN - both parties!)"
-        if "investor" in alert.details:
-            prompt += f"\n• Strategic buyer: {alert.details['investor']}"
-        
-        # Add ownership change information (capital delta) if available
-        if len(alert.trades) > 0:
-            # Check if Delta Own column exists (shows increase in capital/ownership %)
-            if "Delta Own" in alert.trades.columns:
-                delta_values = []
-                for _, row in alert.trades.iterrows():
-                    if pd.notna(row.get("Delta Own")):
-                        delta_own = row["Delta Own"]
-                        if isinstance(delta_own, str) and delta_own.strip():
-                            delta_values.append(delta_own)
-                        elif isinstance(delta_own, (int, float)):
-                            delta_values.append(f"+{delta_own:.1f}%")
-                
-                if delta_values:
-                    prompt += f"\n• Ownership Increase: {', '.join(delta_values[:3])} (shows strong conviction)"
-        
-        # Add recent news headlines for context
-        if context.get("news") and len(context["news"]) > 0:
-            prompt += "\n\nRECENT NEWS:"
-            for news_item in context["news"][:3]:
-                prompt += f"\n• {news_item['title']}"
-                if news_item.get('description'):
-                    prompt += f"\n  {news_item['description']}"
-        
-        prompt += """
+    
+    # Add relevant context
+    if context.get("sector"):
+        prompt += f"\n• Sector: {context['sector']}"
+    if context.get("market_cap"):
+        mc_billions = context["market_cap"] / 1e9
+        prompt += f"\n• Market Cap: ${mc_billions:.1f}B"
+    if context.get("price_change_5d"):
+        prompt += f"\n• 5D: {context['price_change_5d']:+.1f}%"
+    if context.get("price_change_1m"):
+        prompt += f"\n• 1M: {context['price_change_1m']:+.1f}%"
+    if context.get("short_interest"):
+        si = context['short_interest']*100
+        prompt += f"\n• Short Interest: {si:.1f}%" + (" (SQUEEZE RISK!)" if si > 15 else "")
+    if context.get("pe_ratio"):
+        pe = context['pe_ratio']
+        pe_note = " (undervalued)" if pe < 15 else " (expensive)" if pe > 30 else ""
+        prompt += f"\n• P/E: {pe:.1f}{pe_note}"
+    if context.get("distance_from_52w_low"):
+        prompt += f"\n• From 52W Low: +{context['distance_from_52w_low']:.1f}%"
+    
+    # Congressional alignment - highlight proven track record
+    congressional_trades = context.get("congressional_trades", [])
+    ticker = alert.ticker
+    congressional_buys = [
+        t for t in congressional_trades 
+        if t.get("type", "").upper() in ["BUY", "PURCHASE"] 
+        and t.get("ticker", "").upper() == ticker.upper()
+    ]
+    if congressional_buys:
+        politicians = [t.get('politician', 'Unknown') for t in congressional_buys[:2]]
+        prompt += f"\n• 🏛️ **CONGRESSIONAL ALIGNMENT**: {len(congressional_buys)} politicians with proven track records buying ({', '.join(politicians)})"
+        prompt += "\n  NOTE: These are HIGH-CONVICTION traders who consistently outperform the market"
+    
+    # Signal-specific details
+    if "num_insiders" in alert.details:
+        prompt += f"\n• {alert.details['num_insiders']} insiders buying simultaneously"
+        if "total_value" in alert.details:
+            prompt += f" (${alert.details['total_value']:,.0f} total)"
+    if "num_politicians" in alert.details:
+        prompt += f"\n• {alert.details['num_politicians']} politicians"
+        if alert.details.get("bipartisan"):
+            prompt += " (BIPARTISAN - both parties!)"
+    if "investor" in alert.details:
+        prompt += f"\n• Strategic buyer: {alert.details['investor']}"
+    
+    # Add ownership change information
+    if len(alert.trades) > 0:
+        if "Delta Own" in alert.trades.columns:
+            delta_values = []
+            for _, row in alert.trades.iterrows():
+                if pd.notna(row.get("Delta Own")):
+                    delta_own = row["Delta Own"]
+                    if isinstance(delta_own, str) and delta_own.strip():
+                        delta_values.append(delta_own)
+                    elif isinstance(delta_own, (int, float)):
+                        delta_values.append(f"+{delta_own:.1f}%")
+            
+            if delta_values:
+                prompt += f"\n• Ownership Increase: {', '.join(delta_values[:3])} (shows strong conviction)"
+    
+    # Add recent news headlines for context
+    if context.get("news") and len(context["news"]) > 0:
+        prompt += "\n\nRECENT NEWS:"
+        for news_item in context["news"][:3]:
+            prompt += f"\n• {news_item['title']}"
+            if news_item.get('description'):
+                prompt += f"\n  {news_item['description']}"
+    
+    prompt += """
 
 TASK: Provide sharp, professional analysis formatted in clear paragraphs:
 
@@ -1377,55 +1374,69 @@ CRITICAL RULES:
 - MAXIMUM 100 WORDS - be thorough but concise, complete all sentences
 
 Format your response with bold section headers and clear paragraph breaks. DO NOT use markdown ** for bold - just write naturally with good structure."""
-        
-        # Call Ollama API
+    
+    def _clean_llm_response(insight: str) -> str:
+        """Clean up common LLM output artifacts."""
+        prefixes_to_remove = [
+            "Here's the analysis:", "Here is the analysis:",
+            "Analysis:", "Here's my analysis:"
+        ]
+        for prefix in prefixes_to_remove:
+            if insight.startswith(prefix):
+                insight = insight[len(prefix):].strip()
+        # Format section headers for HTML
+        insight = insight.replace("KEY INSIGHT", "<strong>KEY INSIGHT</strong><br>")
+        insight = insight.replace("CATALYSTS", "<br><br><strong>CATALYSTS</strong><br>")
+        insight = insight.replace("RISKS", "<br><br><strong>RISKS</strong><br>")
+        insight = insight.replace("RECOMMENDATION", "<br><br><strong>RECOMMENDATION</strong><br>")
+        insight = insight.replace("**", "")
+        return insight
+    
+    # --- Try GitHub Models (GPT-4o-mini) first ---
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if github_token:
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                base_url="https://models.inference.ai.azure.com",
+                api_key=github_token,
+            )
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": "You are a senior hedge fund analyst. Be concise, skeptical, and data-driven. Maximum 100 words total."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=500,
+            )
+            insight = response.choices[0].message.content.strip()
+            if insight:
+                logger.info(f"Generated AI insight using GitHub Models (GPT-4o-mini) for {alert.ticker}")
+                return _clean_llm_response(insight)
+        except Exception as e:
+            logger.warning(f"GitHub Models API failed: {e}. Trying Ollama fallback.")
+    
+    # --- Try Ollama local ---
+    try:
         response = requests.post(
             "http://localhost:11434/api/generate",
             json={
                 "model": "llama3:latest",
                 "prompt": prompt,
                 "stream": False,
-                "options": {
-                    "temperature": 0.7,
-                    "top_p": 0.9,
-                    "max_tokens": 500
-                }
+                "options": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 500}
             },
             timeout=30
         )
-        
         if response.status_code == 200:
             result = response.json()
             insight = result.get("response", "").strip()
-            
-            # Clean up the output
-            # Remove common prefixes the model adds
-            prefixes_to_remove = [
-                "Here's the analysis:",
-                "Here is the analysis:",
-                "Analysis:",
-                "Here's my analysis:"
-            ]
-            for prefix in prefixes_to_remove:
-                if insight.startswith(prefix):
-                    insight = insight[len(prefix):].strip()
-            
-            # Format the insight with HTML bold tags and line breaks
-            # Replace section headers with bold HTML tags
-            insight = insight.replace("KEY INSIGHT", "<strong>KEY INSIGHT</strong><br>")
-            insight = insight.replace("CATALYSTS", "<br><br><strong>CATALYSTS</strong><br>")
-            insight = insight.replace("RISKS", "<br><br><strong>RISKS</strong><br>")
-            insight = insight.replace("RECOMMENDATION", "<br><br><strong>RECOMMENDATION</strong><br>")
-            
-            # Clean up any remaining ** markdown
-            insight = insight.replace("**", "")
-            
             if insight:
-                logger.info(f"Generated AI insight using Llama 3 for {alert.ticker}")
-                return insight
-    
+                logger.info(f"Generated AI insight using Ollama (Llama 3) for {alert.ticker}")
+                return _clean_llm_response(insight)
     except Exception as e:
-        logger.warning(f"Could not generate AI insight via Ollama: {e}. Using rule-based fallback.")
+        logger.warning(f"Ollama unavailable: {e}. Using rule-based fallback.")
     
     # Fallback to rule-based analysis
     insights = []
@@ -3050,6 +3061,106 @@ def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
     return deduplicated
 
 
+def calculate_insider_alpha_score(alert: InsiderAlert) -> float:
+    """
+    Calculate an alpha calibration score based on the historical track record
+    of each insider in the alert. Queries our database for all past purchases
+    by the same insider(s) to determine conviction and consistency.
+    
+    Factors:
+    - Repeat buyer: Insider has 3+ previous purchases across different tickers = higher conviction
+    - Concentration: Insider has bought THIS same ticker before = strong signal
+    - Average trade size: Historically large buyer = more skin in the game
+    - Buy-to-sell ratio: Insiders who mostly buy (vs sell) = more meaningful buys
+    
+    Returns:
+        Multiplier (0.8 to 1.5): <1.0 = weak track record, >1.0 = strong track record
+    """
+    try:
+        if alert.trades.empty or 'Insider Name' not in alert.trades.columns:
+            return 1.0
+        
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        
+        insider_scores = []
+        
+        for insider_name in alert.trades['Insider Name'].unique():
+            if not insider_name or pd.isna(insider_name):
+                continue
+            
+            # Count all historical purchases by this insider
+            cursor.execute("""
+                SELECT COUNT(*) as buy_count, 
+                       COUNT(DISTINCT ticker) as unique_tickers,
+                       COALESCE(AVG(value), 0) as avg_value,
+                       COALESCE(SUM(CASE WHEN trade_type = 'P' THEN 1 ELSE 0 END), 0) as purchases,
+                       COALESCE(SUM(CASE WHEN trade_type = 'S' THEN 1 ELSE 0 END), 0) as sales
+                FROM openinsider_trades
+                WHERE insider_name = ?
+            """, (insider_name,))
+            
+            row = cursor.fetchone()
+            if not row:
+                insider_scores.append(1.0)
+                continue
+            
+            buy_count, unique_tickers, avg_value, purchases, sales = row
+            
+            score = 1.0
+            
+            # Repeat buyer bonus: 3+ purchases in our DB = conviction
+            if purchases >= 10:
+                score += 0.2  # Very active buyer
+            elif purchases >= 5:
+                score += 0.15
+            elif purchases >= 3:
+                score += 0.1
+            
+            # Concentration bonus: bought THIS ticker before
+            cursor.execute("""
+                SELECT COUNT(*) FROM openinsider_trades
+                WHERE insider_name = ? AND ticker = ? AND trade_type = 'P'
+            """, (insider_name, alert.ticker))
+            same_ticker_buys = cursor.fetchone()[0]
+            
+            if same_ticker_buys >= 3:
+                score += 0.15  # Strong repeat conviction in this specific stock
+            elif same_ticker_buys >= 2:
+                score += 0.1
+            
+            # Buy-to-sell ratio: mostly-buyers are more meaningful
+            total_trades = purchases + sales
+            if total_trades > 0:
+                buy_ratio = purchases / total_trades
+                if buy_ratio >= 0.8:
+                    score += 0.1  # Overwhelmingly a buyer
+                elif buy_ratio < 0.3:
+                    score -= 0.15  # Mostly sells, this buy is less meaningful
+            
+            # Average trade size: historically large buyers have more conviction
+            if avg_value >= 1_000_000:
+                score += 0.1
+            elif avg_value >= 500_000:
+                score += 0.05
+            elif avg_value < 50_000:
+                score -= 0.1  # Small-time buyer
+            
+            insider_scores.append(min(max(score, 0.8), 1.5))
+        
+        conn.close()
+        
+        if not insider_scores:
+            return 1.0
+        
+        # Use the best insider's alpha score (the most credible buyer drives the signal)
+        return max(insider_scores)
+    
+    except Exception as e:
+        logger.warning(f"Could not calculate insider alpha score: {e}")
+        return 1.0
+
+
 def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict] = None) -> float:
     """
     Calculate composite score for signal ranking using multi-factor analysis.
@@ -3191,6 +3302,13 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
         score += 1
     elif alert.details and alert.details.get('bipartisan'):
         score += 1
+    
+    # 8. Insider Alpha Calibration (0.8x to 1.5x)
+    # Based on historical track record of the specific insiders in this alert
+    alpha_multiplier = calculate_insider_alpha_score(alert)
+    if alpha_multiplier != 1.0:
+        logger.debug(f"  Insider alpha calibration for {alert.ticker}: {alpha_multiplier:.2f}x")
+        score *= alpha_multiplier
     
     return round(score, 2)
 
@@ -3875,22 +3993,7 @@ def format_email_html(alert: InsiderAlert) -> str:
             link_url = f"https://www.capitoltrades.com/trades"
         link_text = "View on Capitol Trades →"
     else:
-        # OpenInsider link with full screener format and date range filter
-        if not alert.trades.empty and "Trade Date" in alert.trades.columns:
-            trade_dates = alert.trades["Trade Date"].dropna().tolist()
-            if trade_dates:
-                try:
-                    min_date = pd.to_datetime(min(trade_dates))
-                    max_date = pd.to_datetime(max(trade_dates))
-                    # Use URL-encoded format: %2F for /
-                    date_range = f"{min_date.strftime('%m')}%2F{min_date.strftime('%d')}%2F{min_date.strftime('%Y')}+-+{max_date.strftime('%m')}%2F{max_date.strftime('%d')}%2F{max_date.strftime('%Y')}"
-                    link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
-                except:
-                    link_url = f"http://openinsider.com/screener?s={alert.ticker}"
-            else:
-                link_url = f"http://openinsider.com/screener?s={alert.ticker}"
-        else:
-            link_url = f"http://openinsider.com/screener?s={alert.ticker}"
+        link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
         link_text = "View on OpenInsider →"
     
     html += f"""
@@ -4035,11 +4138,24 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
                 })
             
             if all_trades:
-                # Get users tracking this ticker
-                tracking_users = get_users_tracking_ticker(ticker)
-                if tracking_users:
-                    results.append((ticker, tracking_users, all_trades))
-                    logger.info(f"Found {len(all_trades)} trade(s) for tracked ticker {ticker} (tracked by {len(tracking_users)} user(s))")
+                # Filter out trades already reported (deduplication)
+                new_trades = []
+                for trade in all_trades:
+                    # Generate a unique ID per trade for dedup
+                    trade_id = f"tracked_{ticker}_{trade.get('insider_name', '')}_{trade.get('trade_date', '')}_{trade.get('source', '')}"
+                    trade_id = trade_id.replace(" ", "")[:100]
+                    if not is_alert_already_sent(trade_id):
+                        trade['_dedup_id'] = trade_id
+                        new_trades.append(trade)
+                
+                if new_trades:
+                    # Get users tracking this ticker
+                    tracking_users = get_users_tracking_ticker(ticker)
+                    if tracking_users:
+                        results.append((ticker, tracking_users, new_trades))
+                        logger.info(f"Found {len(new_trades)} NEW trade(s) for tracked ticker {ticker} (filtered from {len(all_trades)} total, tracked by {len(tracking_users)} user(s))")
+                else:
+                    logger.debug(f"All {len(all_trades)} trades for tracked ticker {ticker} already reported")
         
         conn.close()
         return results
@@ -4049,8 +4165,8 @@ def detect_tracked_ticker_activity() -> List[Tuple[str, List[Dict], List[Dict]]]
         return []
 
 
-def format_telegram_message(alert: InsiderAlert) -> str:
-    """Format alert as Telegram message with markdown."""
+def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, confidence: int = 0, ai_insight: str = "") -> str:
+    """Format alert as Telegram message with markdown. Insight-led format."""
     # Escape special characters for Telegram MarkdownV2
     def escape_md(text):
         """Escape special characters for Telegram MarkdownV2."""
@@ -4065,7 +4181,7 @@ def format_telegram_message(alert: InsiderAlert) -> str:
         """Format dollar values with K/M suffixes."""
         if value >= 1_000_000:
             return f"${value/1_000_000:.1f}M"
-        elif value >= 999_500:  # Round up to 1M if >= 999.5K
+        elif value >= 999_500:
             return f"${value/1_000_000:.1f}M"
         elif value >= 1_000:
             return f"${value/1_000:.0f}K"
@@ -4075,40 +4191,78 @@ def format_telegram_message(alert: InsiderAlert) -> str:
     # Check if any users are tracking this ticker
     tracked_users = get_users_tracking_ticker(alert.ticker)
     
-    msg = f"🚨 *{escape_md(alert.signal_type.upper())}* 🚨\n\n"
-    # Format as "Company Name ($TICKER)" instead of "TICKER - Company Name"
+    # --- Header: Signal + Score ---
     company_esc = escape_md(alert.company_name)
     ticker_esc = escape_md(alert.ticker)
+    score_bar = ""
+    if composite_score > 0:
+        filled = min(int(composite_score / 20), 5)  # 0-100 → 0-5 blocks
+        score_bar = "🟩" * filled + "⬜" * (5 - filled)
+    
+    msg = f"🚨 *{escape_md(alert.signal_type.upper())}*\n"
     if alert.company_name != alert.ticker:
-        msg += f"*{company_esc} \\(${ticker_esc}\\)*\n\n"
+        msg += f"*{company_esc} \\(${ticker_esc}\\)*"
     else:
-        msg += f"*${ticker_esc}*\n\n"
+        msg += f"*${ticker_esc}*"
+    if score_bar:
+        msg += f"  {score_bar} {escape_md(f'{composite_score:.0f}')}/100"
+    msg += "\n"
     
     # Mention users who are tracking this ticker
     if tracked_users:
         mentions = []
         for user in tracked_users:
             if user['username']:
-                # Use @username if available
                 mentions.append(f"@{user['username']}")
             else:
-                # Use clickable mention with user_id (works even without username)
                 user_id = user['user_id']
                 first_name = user['first_name'] or 'User'
                 mentions.append(f"[{first_name}](tg://user?id={user_id})")
-        
         if mentions:
-            msg += f"👤 {', '.join(mentions)}\n\n"
+            msg += f"👤 {', '.join(mentions)}\n"
     
-    # Top trades (max 5 for brevity)
-    msg += f"📊 *Trades:*\n"
-    for idx, (_, row) in enumerate(alert.trades.head(5).iterrows()):
-        # Trade Date format: "15Nov" (day + 3-letter month)
-        # For Congressional trades, use "Traded Date" column
+    # --- AI Insight (the centerpiece) ---
+    if ai_insight:
+        # Strip HTML tags for Telegram, keep it plain
+        import re as _re
+        clean_insight = _re.sub(r'<[^>]+>', '', ai_insight)
+        clean_insight = clean_insight.replace('\n\n', '\n').strip()
+        # Truncate to ~300 chars for Telegram readability
+        if len(clean_insight) > 300:
+            clean_insight = clean_insight[:297] + "..."
+        msg += f"\n🧠 *WHY THIS MATTERS*\n{escape_md(clean_insight)}\n"
+    
+    # --- Trade Summary (condensed) ---
+    num_trades = len(alert.trades)
+    total_value = alert.trades['Value'].sum() if 'Value' in alert.trades.columns else 0
+    
+    # Get unique insider names
+    insiders = alert.trades['Insider Name'].unique().tolist() if 'Insider Name' in alert.trades.columns else []
+    
+    summary_parts = []
+    if num_trades > 0:
+        summary_parts.append(f"{num_trades} trade{'s' if num_trades > 1 else ''}")
+    if total_value > 0:
+        summary_parts.append(f"totalling {format_value(total_value)}")
+    if len(insiders) > 1:
+        summary_parts.append(f"by {len(insiders)} insiders")
+    elif len(insiders) == 1:
+        name = insiders[0]
+        name_parts = name.split()
+        if len(name_parts) >= 2:
+            short_name = f"{name_parts[0][0]}. {name_parts[-1]}"
+        else:
+            short_name = name
+        summary_parts.append(f"by {short_name}")
+    
+    if summary_parts:
+        msg += f"\n📊 {escape_md(', '.join(summary_parts))}\n"
+    
+    # Show top 3 trades (condensed format: one line each)
+    for idx, (_, row) in enumerate(alert.trades.head(3).iterrows()):
         trade_date = row.get("Traded Date") if pd.notna(row.get("Traded Date")) else row.get("Trade Date")
         if pd.notna(trade_date):
             if isinstance(trade_date, str):
-                # Parse string date if needed
                 try:
                     from dateutil import parser
                     trade_date = parser.parse(trade_date)
@@ -4118,125 +4272,64 @@ def format_telegram_message(alert: InsiderAlert) -> str:
             else:
                 date = f"{trade_date.day}{trade_date.strftime('%b')}"
         else:
-            date = "N/A"
+            date = ""
         
-        # Format insider name - for Congressional trades, shorten to "Initial. LastName (Party)"
         insider_name = row['Insider Name']
-        if '(' in insider_name and ')' in insider_name:  # Congressional format: "Name (D)-House"
-            # Extract party letter
-            party_match = insider_name.split('(')[1].split(')')[0] if '(' in insider_name else ''
-            # Get name parts
-            name_part = insider_name.split('(')[0].strip()
-            name_parts = name_part.split()
-            if len(name_parts) >= 2:
-                # Format as "J. LastName (D)" - First initial + Last name
-                formatted_name = f"{name_parts[0][0]}. {name_parts[-1]} ({party_match})"
-            else:
-                formatted_name = f"{name_part} ({party_match})"
-            insider = escape_md(formatted_name[:30])
+        name_parts = insider_name.split('(')[0].strip().split() if '(' in insider_name else insider_name.split()
+        if len(name_parts) >= 2:
+            short_name = f"{name_parts[0][0]}. {name_parts[-1]}"
         else:
-            # Corporate insider - format based on signal type
-            if alert.signal_type == "Corporation Purchase":
-                # Keep full name for Corporation Purchase signal
-                insider = escape_md(insider_name[:50])
-            else:
-                # For other signals, format as Initial + Last Name
-                # Only abbreviate if name has exactly 2 parts (FirstName LastName)
-                name_parts = insider_name.split()
-                if len(name_parts) == 2:
-                    # Two-part name: abbreviate first name
-                    formatted_name = f"{name_parts[0][0]}. {name_parts[1]}"
-                    insider = escape_md(formatted_name[:25])
-                elif len(name_parts) > 2:
-                    # Three or more parts (e.g., Robertson Peter J): keep first + last, drop middle
-                    formatted_name = f"{name_parts[0]} {name_parts[-1]}"
-                    insider = escape_md(formatted_name[:25])
-                else:
-                    # Single name or empty
-                    insider = escape_md(insider_name[:25])
+            short_name = insider_name[:20]
         
-        date_esc = escape_md(date)
+        parts = [escape_md(short_name)]
+        if date:
+            parts.append(escape_md(date))
         
-        # Build trade line with underlined date and line break
-        trade_line = f"__"
-        trade_line += date_esc
-        trade_line += f"__\n{insider}"
-        
-        # For Congressional trades, show size range and price
         if "Size Range" in row and pd.notna(row.get("Size Range")) and row.get("Size Range"):
-            size_range = escape_md(str(row["Size Range"]))
-            trade_line += f" \\- {size_range}"
-            # Add price if available
-            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
-                price_val = escape_md(str(row["Price"]))
-                trade_line += f" @ {price_val}"
-        # For corporate insider trades, show dollar value
-        elif pd.notna(row['Value']) and row['Value'] > 0:
-            value_esc = escape_md(format_value(row['Value']))
-            trade_line += f" \\- {value_esc}"
-            # Add price if available for corporate trades
-            if "Price" in row and pd.notna(row.get("Price")) and row.get("Price"):
-                price_val = escape_md(str(row["Price"]))
-                trade_line += f" @ {price_val}"
+            parts.append(escape_md(str(row["Size Range"])))
+        elif pd.notna(row.get('Value')) and row.get('Value', 0) > 0:
+            parts.append(escape_md(format_value(row['Value'])))
         
-        # Add ownership change % if available and not empty (corporate insiders only)
-        if "Delta Own" in row and pd.notna(row["Delta Own"]):
-            delta_own = row["Delta Own"]
-            # Only add if it's a meaningful value (not empty string)
-            if isinstance(delta_own, str) and delta_own.strip():
-                trade_line += f" \\({escape_md(delta_own)}\\)"
-            elif isinstance(delta_own, (int, float)):
-                trade_line += f" \\({delta_own:+.1f}%\\)"
-        
-        msg += trade_line + "\n"
+        pipe_sep = ' \\| '
+        msg += f"  • {pipe_sep.join(parts)}\n"
     
-    if len(alert.trades) > 5:
-        msg += f"• \\.\\.\\.\\+{len(alert.trades) - 5} more\n"
+    if num_trades > 3:
+        remaining = escape_md(str(num_trades - 3))
+        msg += f"  \\.\\.\\.\\+{remaining} more\n"
     
-    # Add company context if available
-    try:
-        context = get_company_context(alert.ticker)
-        # Context fetched for internal use, no AI insights displayed
-    except Exception as e:
-        logger.warning(f"Could not add context to message: {e}")
+    # --- Links ---
+    links = []
+    is_congressional = "Congressional" in alert.signal_type
     
-    # Provide link - HTTPS links are clickable in Telegram
-    # Check if this is a Congressional signal
-    if "Congressional" in alert.signal_type:
-        # Get ALL politician_ids from trades for a comprehensive link
+    if is_congressional:
+        issuer_ids = []
         politician_ids = []
-        if not alert.trades.empty and "Politician ID" in alert.trades.columns:
-            for _, row in alert.trades.iterrows():
-                pid = str(row.get("Politician ID", "")).strip()
-                if pid and pid != "nan" and pid not in politician_ids:
-                    politician_ids.append(pid)
+        if not alert.trades.empty:
+            if "Issuer ID" in alert.trades.columns:
+                for _, row in alert.trades.iterrows():
+                    iid = str(row.get("Issuer ID", "")).strip()
+                    if iid and iid != "nan" and iid not in issuer_ids:
+                        issuer_ids.append(iid)
+            if "Politician ID" in alert.trades.columns:
+                for _, row in alert.trades.iterrows():
+                    pid = str(row.get("Politician ID", "")).strip()
+                    if pid and pid != "nan" and pid not in politician_ids:
+                        politician_ids.append(pid)
         
-        if politician_ids:
-            # Build link with all politician IDs (Capitol Trades doesn't filter by ticker param)
-            pol_params = '&'.join([f"politician={pid}" for pid in politician_ids])
-            link_url = f"https://www.capitoltrades.com/trades?{pol_params}"
+        if issuer_ids:
+            link_url = f"https://www.capitoltrades.com/issuers/{issuer_ids[0]}"
+        elif politician_ids:
+            link_url = f"https://www.capitoltrades.com/politicians/{politician_ids[0]}"
         else:
-            # Fallback - just show all trades
             link_url = f"https://www.capitoltrades.com/trades"
-        msg += f"\n🔗 [View on Capitol Trades]({escape_md(link_url)})"
-    else:
-        # OpenInsider link with full screener format and date range filter
-        if not alert.trades.empty and "Trade Date" in alert.trades.columns:
-            trade_dates = alert.trades["Trade Date"].dropna().tolist()
-            if trade_dates:
-                try:
-                    min_date = pd.to_datetime(min(trade_dates))
-                    max_date = pd.to_datetime(max(trade_dates))
-                    # Use URL-encoded format: %2F for /
-                    date_range = f"{min_date.strftime('%m')}%2F{min_date.strftime('%d')}%2F{min_date.strftime('%Y')}+-+{max_date.strftime('%m')}%2F{max_date.strftime('%d')}%2F{max_date.strftime('%Y')}"
-                    link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
-                except:
-                    link_url = f"http://openinsider.com/screener?s={alert.ticker}"
-            else:
-                link_url = f"http://openinsider.com/screener?s={alert.ticker}"
-        else:
-            link_url = f"http://openinsider.com/screener?s={alert.ticker}"
-        msg += f"\n🔗 [View on OpenInsider]({escape_md(link_url)})"
+        links.append(f"[Capitol Trades]({escape_md(link_url)})")
+    
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+    links.append(f"[OpenInsider]({escape_md(oi_link)})")
+    
+    if links:
+        link_sep = ' \\| '
+        msg += f"\n🔗 {link_sep.join(links)}"
     return msg
 
 
@@ -4348,18 +4441,7 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         logger.warning(f"Could not add context to text email: {e}")
     
     text += "\n" + "=" * 70 + "\n"
-    # Build filtered OpenInsider link with date range (same as Telegram)
-    oi_link = f"http://openinsider.com/screener?s={alert.ticker}"
-    if not alert.trades.empty and "Trade Date" in alert.trades.columns:
-        trade_dates = alert.trades["Trade Date"].dropna().tolist()
-        if trade_dates:
-            try:
-                min_date = pd.to_datetime(min(trade_dates))
-                max_date = pd.to_datetime(max(trade_dates))
-                date_range = f"{min_date.strftime('%m')}%2F{min_date.strftime('%d')}%2F{min_date.strftime('%Y')}+-+{max_date.strftime('%m')}%2F{max_date.strftime('%d')}%2F{max_date.strftime('%Y')}"
-                oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
-            except:
-                pass
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
     text += f"View on OpenInsider: {oi_link}\n"
     text += f"\nAlert ID: {alert.alert_id[:16]}...\n"
     text += "\nALPHA WHISPERER - Insider Trading Intelligence\n"
@@ -4517,8 +4599,20 @@ def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
         # Support multiple chat IDs (comma-separated)
         chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(",")]
         
-        # Format message
-        message_text = format_telegram_message(alert)
+        # Format message with AI insight and composite score
+        try:
+            context = get_company_context(alert.ticker)
+            composite_score = calculate_composite_signal_score(alert, context)
+            confidence_score, _ = calculate_confidence_score(alert, context)
+            ai_insight = generate_ai_insight(alert, context, confidence_score)
+        except Exception as e:
+            logger.warning(f"Could not enrich alert for Telegram: {e}")
+            context = {}
+            composite_score = 0
+            confidence_score = 0
+            ai_insight = ""
+        
+        message_text = format_telegram_message(alert, composite_score=composite_score, confidence=confidence_score, ai_insight=ai_insight)
         
         # Generate chart image
         chart_buf = generate_stock_chart(alert.ticker, days=180)
@@ -4762,26 +4856,7 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             capitol_link_esc = escape_md(capitol_link)
             links.append(f"[View on Capitol Trades]({capitol_link_esc})")
         if has_openinsider:
-            # Build OpenInsider link with full screener format and date range
-            oi_trades = [t for t in sorted_trades if t.get('source') == 'OpenInsider']
-            if oi_trades:
-                # Get date range from trades
-                trade_dates = [t.get('trade_date') for t in oi_trades if t.get('trade_date')]
-                if trade_dates:
-                    min_date = min(trade_dates)
-                    max_date = max(trade_dates)
-                    # Format dates with URL encoding
-                    try:
-                        min_dt = pd.to_datetime(min_date)
-                        max_dt = pd.to_datetime(max_date)
-                        date_range = f"{min_dt.strftime('%m')}%2F{min_dt.strftime('%d')}%2F{min_dt.strftime('%Y')}+-+{max_dt.strftime('%m')}%2F{max_dt.strftime('%d')}%2F{max_dt.strftime('%Y')}"
-                        oi_link = f"http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=-1&fdr={date_range}&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
-                    except:
-                        oi_link = f"http://openinsider.com/screener?s={ticker}"
-                else:
-                    oi_link = f"http://openinsider.com/screener?s={ticker}"
-            else:
-                oi_link = f"http://openinsider.com/screener?s={ticker}"
+            oi_link = f"http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
             oi_link_esc = escape_md(oi_link)
             links.append(f"[View on OpenInsider]({oi_link_esc})")
         
@@ -5365,46 +5440,16 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
             
             return score
     
-    # Count ALL signals by type for intro message (not just top N)
+    # Count ALL signals by type for logging (not just top N)
     signal_counts = {}
     all_detected_alerts = [alert for alert, _ in tracked_alerts] + new_alerts
     for alert in all_detected_alerts:
         signal_type = alert.signal_type
         signal_counts[signal_type] = signal_counts.get(signal_type, 0) + 1
     
-    # Always include Congressional signals in the count (even if 0) when Capitol Trades is enabled
-    if USE_CAPITOL_TRADES:
-        if 'Congressional Cluster Buy' not in signal_counts:
-            signal_counts['Congressional Cluster Buy'] = 0
-        if 'Congressional Buy' not in signal_counts:
-            signal_counts['Congressional Buy'] = 0
+    logger.info(f"Signal breakdown: {signal_counts}")
     
-    # Always include all signal types in the summary (even if 0)
-    # Note: Bearish signals removed - we focus on BUY opportunities only
-    all_signal_types = [
-        'Trinity Signal',
-        'Congressional Cluster Buy',
-        'Investment Fund Buy',
-        'Congressional Buy',
-        'Cluster Buying',
-        'C-Suite Buy',
-        'Corporation Purchase',
-        'Large Single Buy'
-    ]
-    for sig_type in all_signal_types:
-        if sig_type not in signal_counts:
-            signal_counts[sig_type] = 0
-    
-    # Add tracked ticker count if provided
-    tracked_ticker_count = len(tracked_ticker_activity) if tracked_ticker_activity else 0
-    if tracked_ticker_count > 0:
-        signal_counts['Tracked Tickers'] = tracked_ticker_count
-    
-    # Send intro message to Telegram if there are signals to send
-    if USE_TELEGRAM and (tracked_ticker_count > 0 or tracked_alerts or regular_alerts) and not dry_run:
-        send_telegram_intro(signal_counts, dry_run=dry_run)
-    
-    # Send regular signals to Telegram (capped at 3)
+    # Send regular signals to Telegram (capped at TOP_SIGNALS_PER_DAY)
     for alert in regular_alerts:
         if USE_TELEGRAM:
             telegram_sent = send_telegram_alert(alert, dry_run=dry_run)
@@ -5415,7 +5460,13 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
     if tracked_ticker_activity:
         for ticker, tracking_users, trades in tracked_ticker_activity:
             if not dry_run:
-                send_tracked_ticker_alert(ticker, tracking_users, trades, dry_run=dry_run)
+                sent = send_tracked_ticker_alert(ticker, tracking_users, trades, dry_run=dry_run)
+                # Mark individual trades as sent to prevent repeats
+                if sent:
+                    for trade in trades:
+                        dedup_id = trade.get('_dedup_id')
+                        if dedup_id and not test_mode:
+                            mark_alert_as_sent(dedup_id, ticker, 'Tracked Ticker', expires_days=30)
     
     # Send tracked ticker alerts via email (all of them)
     for alert, users in tracked_alerts:
@@ -5509,10 +5560,6 @@ def run_once(since_date: Optional[str] = None, dry_run: bool = False, verbose: b
         all_ranked_alerts = None  # Keep full ranked list for fallback
         if TOP_SIGNALS_PER_DAY > 0 and len(alerts) > TOP_SIGNALS_PER_DAY:
             logger.info(f"\nApplying Top-{TOP_SIGNALS_PER_DAY} filter to select strongest signals...")
-            
-            # Send pre-filter summary email showing ALL signals and their scores
-            if not dry_run:
-                send_signal_summary_email(alerts)
             
             # Apply the filter and keep full ranked list
             all_ranked_alerts = select_top_signals(alerts, top_n=len(alerts), enrich_context=True)  # Get ALL ranked
