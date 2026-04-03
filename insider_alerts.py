@@ -1455,90 +1455,114 @@ Format your response with bold section headers and clear paragraph breaks. DO NO
     
     if congressional_buys_this_stock:
         num_congress = len(congressional_buys_this_stock)
-        politicians = [f"{t['politician']}" for t in congressional_buys_this_stock[:3]]  # First 3
+        politicians = [f"{t['politician']}" for t in congressional_buys_this_stock[:3]]
         politicians_str = ", ".join(politicians)
         if num_congress > 3:
             politicians_str += f", and {num_congress - 3} others"
         
         insights.append(f"🏛️ CONGRESSIONAL ALIGNMENT: {num_congress} politician(s) recently bought {ticker} ({politicians_str}). "
-                       f"Members of Congress have access to policy discussions, committee hearings, and regulatory insights not available to the public. "
-                       f"When Congressional buys align with corporate insider buying, it creates an exceptionally strong signal - "
-                       f"both groups with privileged information are betting on the same outcome.")
+                       f"Congressional buys aligning with corporate insider buying creates an exceptionally strong signal.")
         recommendation = "STRONG BUY"
         reasoning.append(f"{num_congress} Congressional buy(s) of {ticker} + insider buying")
     
     # Analyze short squeeze potential
     short_interest = context.get("short_interest")
-    if short_interest and short_interest > 0.15:  # >15% short
-        if alert.signal_type in ["Cluster Buying", "Strategic Investor Buy", "CEO/CFO Buy"]:
-            insights.append(f"🔥 SHORT SQUEEZE SETUP: {short_interest*100:.1f}% of shares are sold short. "
-                          f"Insiders are buying heavily while shorts bet against the stock. "
-                          f"If the stock rises, short sellers will be forced to buy shares to cover their positions, "
-                          f"creating a feedback loop that could rocket the price higher.")
-            recommendation = "STRONG BUY"
-            reasoning.append("High short interest + insider buying = squeeze potential")
+    if short_interest and short_interest > 0.15:
+        insights.append(f"🔥 SHORT SQUEEZE SETUP: {short_interest*100:.1f}% of shares are sold short while insiders buy heavily. "
+                       f"Forced short covering could amplify any upside move.")
+        recommendation = "STRONG BUY"
+        reasoning.append("High short interest + insider buying = squeeze potential")
     
     # Analyze dip buying
     dist_from_low = context.get("distance_from_52w_low")
-    if dist_from_low is not None and dist_from_low < 20:  # Within 20% of 52w low
-        insights.append(f"💎 DIP BUYING OPPORTUNITY: Stock is trading just {dist_from_low:.1f}% above its 52-week low. "
-                       f"Insiders are buying at/near the bottom, signaling they believe the worst is over. "
-                       f"This is classic 'smart money' behavior - buying when pessimism is highest.")
+    if dist_from_low is not None and dist_from_low < 20:
+        insights.append(f"💎 DIP BUYING: Stock trades just {dist_from_low:.1f}% above its 52-week low. "
+                       f"Insiders buying near the bottom is classic smart money behavior.")
         if recommendation != "STRONG BUY":
             recommendation = "BUY"
         reasoning.append("Buying near 52-week low")
     
-    # Analyze insider conviction
+    # Analyze insider conviction by signal type
+    total_value = alert.details.get("total_value") or alert.details.get("value", 0)
+    num_insiders = alert.details.get("num_insiders") or alert.details.get("insider_count", len(alert.trades))
+    
     if alert.signal_type == "Cluster Buying":
-        num_insiders = alert.details.get("num_insiders", 0)
-        insights.append(f"👥 INSIDER CONSENSUS: {num_insiders} different insiders are buying simultaneously. "
-                       f"When multiple insiders act together, it's rarely a coincidence. "
-                       f"They have access to non-public information and collectively see major upside ahead.")
+        insights.append(f"👥 INSIDER CONSENSUS: {num_insiders} insiders buying simultaneously totaling ${total_value:,.0f}. "
+                       f"Coordinated buying rarely happens by coincidence - they likely share material knowledge of upcoming catalysts.")
+        if total_value >= 1_000_000:
+            recommendation = "STRONG BUY"
+        elif recommendation not in ("STRONG BUY",):
+            recommendation = "BUY"
         reasoning.append("Multiple insiders = strong conviction")
-    elif alert.signal_type == "Strategic Investor Buy":
-        investor = alert.details.get("investor", "")
-        insights.append(f"🏢 STRATEGIC INVESTMENT: {investor} is taking a position. "
-                       f"Corporate investors conduct months of due diligence before investing. "
-                       f"This could signal a strategic partnership, acquisition interest, or validation of the technology/business model.")
+    elif alert.signal_type == "C-Suite Buy":
+        titles = alert.details.get("titles", [])
+        title_str = ", ".join(titles[:3]) if titles else "C-Suite"
+        insights.append(f"🏢 C-SUITE CONVICTION: {title_str} putting personal capital on the line (${total_value:,.0f}). "
+                       f"Top executives have the most comprehensive view of company fundamentals and pipeline.")
+        if total_value >= 500_000:
+            recommendation = "STRONG BUY"
+        elif recommendation not in ("STRONG BUY",):
+            recommendation = "BUY"
+        reasoning.append("C-suite executive buying")
+    elif alert.signal_type == "Corporation Purchase":
+        investor = alert.details.get("investor", "Corporate entity")
+        insights.append(f"🏢 STRATEGIC INVESTMENT: {investor} taking a position (${total_value:,.0f}). "
+                       f"Corporate investors conduct extensive due diligence - signals strategic partnership or acquisition interest.")
         recommendation = "STRONG BUY"
         reasoning.append("Corporate strategic investment")
+    elif alert.signal_type == "Large Single Buy":
+        insights.append(f"💰 LARGE PURCHASE: ${total_value:,.0f} single buy shows exceptional conviction. "
+                       f"Insiders rarely commit this much personal capital without strong confidence in near-term upside.")
+        if recommendation not in ("STRONG BUY",):
+            recommendation = "BUY"
+        reasoning.append("Exceptionally large purchase")
+    elif alert.signal_type == "Trinity Signal":
+        insights.append(f"🔺 TRIPLE CONVERGENCE: Corporate insiders, Congressional traders, and superinvestors all aligned on {ticker}. "
+                       f"This is the highest-conviction signal type - three independent sources with privileged information agree.")
+        recommendation = "STRONG BUY"
+        reasoning.append("Triple source convergence")
+    elif alert.signal_type == "First Buy in 12 Months":
+        insights.append(f"🆕 FIRST BUY IN 12 MONTHS: Insiders breaking a year-long buying drought (${total_value:,.0f}). "
+                       f"This often precedes a major catalyst - earnings surprise, product launch, or strategic announcement.")
+        if recommendation not in ("STRONG BUY",):
+            recommendation = "BUY"
+        reasoning.append("First insider buy in 12 months")
+    elif "Congressional" in alert.signal_type:
+        num_pols = alert.details.get("num_politicians", 1)
+        insights.append(f"🏛️ CONGRESSIONAL TRADE: {num_pols} politician(s) buying {ticker}. "
+                       f"These proven traders have access to legislative and regulatory insights not available to the public.")
+        if recommendation not in ("STRONG BUY",):
+            recommendation = "BUY"
+        reasoning.append("Congressional insider buying")
     
-    # Analyze valuation + buying
+    # Analyze valuation
     pe_ratio = context.get("pe_ratio")
     if pe_ratio and 5 < pe_ratio < 15:
-        insights.append(f"📊 UNDERVALUED + INSIDER BUYING: P/E ratio of {pe_ratio:.1f} suggests the stock is attractively valued. "
-                       f"Insiders are buying when the stock is already cheap - double signal of opportunity.")
+        insights.append(f"📊 ATTRACTIVE VALUATION: P/E of {pe_ratio:.1f} suggests undervaluation. Insiders buying cheap stock doubles the signal.")
         reasoning.append("Attractive valuation")
+    elif pe_ratio and pe_ratio > 40:
+        insights.append(f"⚠️ RICH VALUATION: P/E of {pe_ratio:.1f} is elevated. Insiders may see catalysts not yet priced in, but entry at premium valuations carries risk.")
+        reasoning.append("High valuation - caution")
     
-    # Price momentum consideration
+    # Price momentum
     price_change_5d = context.get("price_change_5d")
     price_change_1m = context.get("price_change_1m")
     if price_change_5d is not None and price_change_1m is not None:
         if price_change_5d < -5 and price_change_1m < -10:
-            insights.append(f"⚠️ CATCHING A FALLING KNIFE: Stock is down {abs(price_change_1m):.1f}% over the last month. "
-                           f"While insiders may be right long-term, short-term momentum is negative. "
-                           f"Consider waiting for price stabilization or dollar-cost averaging.")
+            insights.append(f"⚠️ CATCHING A FALLING KNIFE: Stock down {abs(price_change_1m):.1f}% over 1 month. "
+                           f"Insiders may be right long-term, but consider dollar-cost averaging rather than a full position.")
             if recommendation == "BUY":
-                recommendation = "WAIT FOR CONFIRMATION"
-            reasoning.append("Negative momentum - caution advised")
+                recommendation = "BUY WITH CAUTION"
+            reasoning.append("Negative momentum")
+        elif price_change_5d > 3 and price_change_1m > 10:
+            insights.append(f"📈 STRONG MOMENTUM: Stock up {price_change_1m:.1f}% over 1 month. Insiders buying into strength confirms the trend.")
+            reasoning.append("Positive momentum confirms signal")
     
-    # Final recommendation based on confidence
-    if confidence >= 4 and not insights:
-        insights.append(f"✅ HIGH CONVICTION SIGNAL: This {alert.signal_type.lower()} scores {confidence}/5 on our confidence scale. "
-                       f"Multiple positive factors align, suggesting significant insider conviction about future prospects.")
-        recommendation = "BUY"
-    elif confidence <= 2:
-        insights.append(f"⚠️ LOWER CONVICTION: This signal scores {confidence}/5. "
-                       f"While insiders are buying, the size and context suggest moderate rather than exceptional opportunity.")
-        recommendation = "MONITOR"
-        reasoning.append("Lower confidence score")
-    
-    # Default insight if none triggered
+    # Default insight if none triggered (shouldn't happen now but safety net)
     if not insights:
-        insights.append(f"📈 INSIDER ACCUMULATION: {alert.signal_type} detected. "
-                       f"Insiders are putting their own money on the line, which historically signals undervaluation. "
-                       f"However, no exceptional catalysts identified. Standard insider buy opportunity.")
-        recommendation = "HOLD/ACCUMULATE"
+        insights.append(f"📈 INSIDER ACCUMULATION: {alert.signal_type} detected for {alert.ticker}. "
+                       f"Insiders putting personal capital at risk (${total_value:,.0f}) historically signals undervaluation.")
+        recommendation = "BUY"
     
     # Build final insight
     insight_text = " ".join(insights)
@@ -1548,12 +1572,12 @@ Format your response with bold section headers and clear paragraph breaks. DO NO
         action = "🚀 RECOMMENDATION: STRONG BUY - Multiple bullish factors align. Consider taking a position."
     elif recommendation == "BUY":
         action = "✅ RECOMMENDATION: BUY - Positive setup with good risk/reward. Entry recommended."
+    elif recommendation == "BUY WITH CAUTION":
+        action = "✅ RECOMMENDATION: BUY WITH CAUTION - Signal is strong but momentum is negative. Consider scaling in gradually."
     elif recommendation == "HOLD/ACCUMULATE":
         action = "📊 RECOMMENDATION: HOLD/ACCUMULATE - Solid opportunity. Build position gradually."
     elif recommendation == "MONITOR":
         action = "👀 RECOMMENDATION: MONITOR - Watch for additional confirmation before entering."
-    elif recommendation == "WAIT FOR CONFIRMATION":
-        action = "⏳ RECOMMENDATION: WAIT - Let price stabilize before entering. Set alerts."
     else:
         action = "📌 RECOMMENDATION: HOLD - Neutral signal. Existing holders maintain position."
     
@@ -1610,15 +1634,24 @@ def calculate_confidence_score(alert: InsiderAlert, context: Dict) -> tuple[int,
         if alert.signal_type == "Cluster Buying":
             score += 2
             reasons.append("Multiple insiders buying")
-        elif alert.signal_type == "Strategic Investor Buy":
+        elif alert.signal_type == "Corporation Purchase":
             score += 2
             reasons.append("Corporate strategic investment")
-        elif alert.signal_type == "CEO/CFO Buy":
+        elif alert.signal_type == "C-Suite Buy":
             score += 1.5
             reasons.append("C-suite executive buying")
+        elif alert.signal_type == "Trinity Signal":
+            score += 2.5
+            reasons.append("Triple convergence signal")
         elif alert.signal_type == "Large Single Buy":
             score += 1
             reasons.append("Significant purchase size")
+        elif alert.signal_type == "First Buy in 12 Months":
+            score += 1.5
+            reasons.append("First insider buy in 12 months")
+        else:
+            score += 1
+            reasons.append(alert.signal_type)
     
     # Purchase size (0-1 points)
     total_value = alert.details.get("total_value") or alert.details.get("value", 0)
@@ -3221,13 +3254,11 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
         'Investment Fund Buy': 8.5,
         'Congressional Buy': 8,
         'Cluster Buying': 7,
-        'Corporation Purchase': 5,                     # Reduced from 7 - still significant but not dominating
         'C-Suite Buy': 6,
+        'First Buy in 12 Months': 6,
+        'Corporation Purchase': 5,
         'Large Single Buy': 5,
-        'Strategic Investor Buy': 5,
         'Bearish Cluster Selling': 3,
-        'Congressional Cluster Buy': 8,  # Legacy name
-        'Large Congressional Buy': 7     # Legacy name
     }
     score += signal_type_scores.get(alert.signal_type, 4)
     
@@ -3993,7 +4024,7 @@ def format_email_html(alert: InsiderAlert) -> str:
             link_url = f"https://www.capitoltrades.com/trades"
         link_text = "View on Capitol Trades →"
     else:
-        link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+        link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
         link_text = "View on OpenInsider →"
     
     html += f"""
@@ -4302,29 +4333,11 @@ def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, con
     is_congressional = "Congressional" in alert.signal_type
     
     if is_congressional:
-        issuer_ids = []
-        politician_ids = []
-        if not alert.trades.empty:
-            if "Issuer ID" in alert.trades.columns:
-                for _, row in alert.trades.iterrows():
-                    iid = str(row.get("Issuer ID", "")).strip()
-                    if iid and iid != "nan" and iid not in issuer_ids:
-                        issuer_ids.append(iid)
-            if "Politician ID" in alert.trades.columns:
-                for _, row in alert.trades.iterrows():
-                    pid = str(row.get("Politician ID", "")).strip()
-                    if pid and pid != "nan" and pid not in politician_ids:
-                        politician_ids.append(pid)
-        
-        if issuer_ids:
-            link_url = f"https://www.capitoltrades.com/issuers/{issuer_ids[0]}"
-        elif politician_ids:
-            link_url = f"https://www.capitoltrades.com/politicians/{politician_ids[0]}"
-        else:
-            link_url = f"https://www.capitoltrades.com/trades"
+        # Capitol Trades: search by ticker on issuers page (verified working)
+        link_url = f"https://www.capitoltrades.com/issuers?search={alert.ticker}"
         links.append(f"[Capitol Trades]({escape_md(link_url)})")
     
-    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
     links.append(f"[OpenInsider]({escape_md(oi_link)})")
     
     if links:
@@ -4441,7 +4454,7 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         logger.warning(f"Could not add context to text email: {e}")
     
     text += "\n" + "=" * 70 + "\n"
-    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
     text += f"View on OpenInsider: {oi_link}\n"
     text += f"\nAlert ID: {alert.alert_id[:16]}...\n"
     text += "\nALPHA WHISPERER - Insider Trading Intelligence\n"
@@ -4856,7 +4869,7 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             capitol_link_esc = escape_md(capitol_link)
             links.append(f"[View on Capitol Trades]({capitol_link_esc})")
         if has_openinsider:
-            oi_link = f"http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&xs=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+            oi_link = f"http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
             oi_link_esc = escape_md(oi_link)
             links.append(f"[View on OpenInsider]({oi_link_esc})")
         
