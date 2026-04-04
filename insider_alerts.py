@@ -48,12 +48,18 @@ LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 LOG_FILE = LOG_DIR / "insider_alerts.log"
 
+# Use UTF-8 for console on Windows (avoids UnicodeEncodeError with emoji in log msgs)
+_console_handler = logging.StreamHandler(sys.stdout)
+if sys.platform == "win32":
+    import io
+    _console_handler = logging.StreamHandler(io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace"))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(sys.stdout)
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+        _console_handler,
     ]
 )
 logger = logging.getLogger(__name__)
@@ -591,8 +597,40 @@ def get_company_context(ticker: str) -> Dict[str, any]:
     except Exception as e:
         logger.warning(f"Could not fetch company info for {ticker}: {e}")
     
-    # NewsAPI integration removed - not needed for core signal detection
-    
+    # Fetch recent news headlines via yfinance (free, no API key needed)
+    try:
+        raw_news = stock.news if hasattr(stock, 'news') else []
+        if callable(raw_news):
+            raw_news = raw_news() or []
+        else:
+            raw_news = raw_news or []
+        news_items = []
+        for item in raw_news[:5]:
+            # Handle both old yfinance (flat dict) and new (nested content)
+            title = (item.get('title') or
+                     item.get('content', {}).get('title', ''))
+            publisher = (item.get('publisher') or
+                         item.get('content', {}).get('provider', {}).get('displayName', ''))
+            link = (item.get('link') or
+                    item.get('content', {}).get('canonicalUrl', {}).get('url', ''))
+            pub_time = item.get('providerPublishTime') or item.get('pubDate', '')
+            # Convert epoch to ISO string if needed
+            if isinstance(pub_time, (int, float)) and pub_time > 0:
+                from datetime import datetime, timezone
+                pub_time = datetime.fromtimestamp(pub_time, tz=timezone.utc).strftime('%Y-%m-%d')
+            if title:
+                news_items.append({
+                    "title": f"{title} ({publisher})" if publisher else title,
+                    "url": link,
+                    "published_at": str(pub_time) if pub_time else "",
+                    "image_url": "",
+                })
+        context["news"] = news_items
+        if news_items:
+            logger.debug(f"Fetched {len(news_items)} news items for {ticker}")
+    except Exception as e:
+        logger.debug(f"Could not fetch news for {ticker}: {e}")
+
     # Get congressional trades
     context["congressional_trades"] = get_congressional_trades(ticker)
     
@@ -3384,7 +3422,7 @@ def select_top_signals(
         return alerts
     
     if len(alerts) <= top_n:
-        logger.info(f"Only {len(alerts)} signals detected (≤ top_n={top_n}), returning all")
+        logger.info(f"Only {len(alerts)} signals detected (<= top_n={top_n}), returning all")
         return alerts
     
     logger.info(f"Scoring {len(alerts)} signals to select top {top_n}...")

@@ -418,6 +418,8 @@ def run_backtest(elite_only=False, max_signals=5000, min_trades=5):
     print("DONE")
     print("=" * 70)
 
+    return politician_stats
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Congressional Trading Backtest")
