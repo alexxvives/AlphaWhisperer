@@ -1,7 +1,24 @@
 # InvestorAI - Complete Algorithm Architecture & Logic Flow
 
-## 🔄 Recent Changes (v1.1)
+## 🔄 Recent Changes (v2.0 — Quant-Calibrated Scoring)
 
+- **Scoring Overhaul (9-Factor v2)**: `calculate_composite_signal_score()` now uses 9 factors: signal type hierarchy, temporal convergence, market-cap-normalized dollar value (% of market cap), insider seniority, small-cap multiplier (no mega-cap penalty), short interest, bipartisan bonus, insider alpha calibration (MEDIAN not MAX), and time decay (10%/day, 0.3x floor). Accepts optional `score_date` param for backtesting.
+- **Signal Type Hierarchy**: Trinity=10, Cluster=8, C-Suite=7, Congressional Cluster=6, Congressional Buy=5.5, Corporation Purchase=5, Large Single=4, Bearish=3. Removed "First Buy in 12 Months" (broken).
+- **Strict Mutual Exclusion**: `deduplicate_alerts()` now enforces ONE signal per ticker. Highest priority wins (Trinity > Congressional Cluster > Congressional Buy > Corp Purchase > Cluster > C-Suite > Large Single > Bearish). Suppressed signals are logged.
+- **Time Decay**: Factor 9 decays signal value by 10% per day (0.3x floor). Fresh signals score 3x higher than 7+ day old signals.
+- **Backtest Module**: New `backtest.py` replays historical signals through the scoring engine, fetches 7/30/60/90-day forward returns via yfinance, and reports win rates by signal type and score tier.
+
+### v2.0 Backtest Results (248 signals, 243 with price data)
+| Horizon | Win Rate | Avg Return | Median |
+|---------|----------|------------|--------|
+| 7-Day   | 70.4%    | +6.49%     | +3.65% |
+| 30-Day  | 66.3%    | +8.70%     | +3.81% |
+| 60-Day  | 62.2%    | +9.19%     | +5.66% |
+| 90-Day  | 53.1%    | +7.36%     | +1.77% |
+
+Best signal type: **Cluster Buying** (73% WR at 90d, +15.3% avg). C-Suite Buy fades long-term (44% WR at 90d).
+
+### Previous Changes (v1.1)
 - **AI Insights (GPT-4o-mini)**: `generate_ai_insight()` now tries GitHub Models API (free via `GITHUB_TOKEN`) before falling back to Ollama, then rule-based analysis. Requires `openai` package and `GITHUB_TOKEN` env var.
 - **Insider Alpha Calibration**: New `calculate_insider_alpha_score()` function queries the insider's historical trades from DB (buy count, unique tickers, avg value, buy-to-sell ratio, repeat conviction). Applied as Factor 8 (0.8x-1.5x multiplier) in `calculate_composite_signal_score()`.
 - **Streamlined Telegram Format**: `format_telegram_message()` now receives composite score, confidence, and AI insight. Shows score bar (🟩/⬜), "WHY THIS MATTERS" AI section, condensed trade summary (3 trades max), and clean links.
@@ -306,25 +323,23 @@ def detect_temporal_convergence(ticker, lookback_days=30):
 
 ### PHASE 4: COMPOSITE SCORING & RANKING
 
-**Execution**: `calculate_composite_signal_score(alert, context)`
+**Execution**: `calculate_composite_signal_score(alert, context, score_date=None)`
 
-**Multi-Factor Scoring Algorithm** (5-20 point range):
+**Multi-Factor Scoring Algorithm v2.0** (1-20 point range):
 
-**Factor 1: Signal Type Hierarchy (0-10 points)**
+**Factor 1: Signal Type Hierarchy (3-10 points)**
 ```python
 signal_type_scores = {
-    'Trinity Signal': 10,                          # Highest conviction
-    'Bipartisan Elite Congressional Cluster': 9.5,
-    'Elite Congressional Cluster': 9,
-    'Elite Congressional Buy': 8,
-    'Cluster Buying': 7,
-    'Corporation Purchase': 7,
-    'C-Suite Buy': 6,
-    'Large Single Buy': 5,
-    'Strategic Investor Buy': 5,
-    'Bearish Cluster Selling': 3
+    'Trinity Signal': 10,              # Tier 1: Highest conviction (3-source convergence)
+    'Cluster Buying': 8,               # Tier 1: Strongest single-source signal
+    'C-Suite Buy': 7,                  # Tier 1: CEO/CFO direct conviction
+    'Congressional Cluster Buy': 6,    # Tier 2: Watchlist (unvalidated elite list)
+    'Congressional Buy': 5.5,          # Tier 2: Watchlist
+    'Corporation Purchase': 5,         # Tier 2: Watchlist
+    'Large Single Buy': 4,             # Tier 2: Watchlist (no title context)
+    'Bearish Cluster Selling': 3,      # Tier 2: Watchlist (sell signals noisy)
 }
-score += signal_type_scores.get(alert.signal_type, 4)
+score += signal_type_scores.get(alert.signal_type, 3)
 ```
 
 **Factor 2: Temporal Convergence Bonus (0-3 points)** (Trinity Signals only)
@@ -338,80 +353,75 @@ if alert.signal_type == 'Trinity Signal':
         score += 2  # All within 14 days
     else:
         score += 1  # Concurrent within 30 days
+    
+    if convergence_score >= 9:
+        score += 1  # Extra bonus for very high convergence
 ```
 
 **Factor 3: Dollar Value Score (0-3 points)**
+Market-cap-normalized when context available, absolute fallback otherwise:
 ```python
-total_value = get_total_trade_value(alert)
+# Preferred: % of market cap
+if market_cap > 0:
+    value_pct = (total_value / market_cap) * 100
+    if value_pct >= 0.1:    score += 3    # Massive relative to company
+    elif value_pct >= 0.01: score += 2    # Significant  
+    elif value_pct >= 0.001: score += 1.5 # Notable
+    else:                   score += 0.5  # Trivial
 
-if total_value >= 5_000_000:
-    score += 3
-elif total_value >= 1_000_000:
-    score += 2
-elif total_value >= 500_000:
-    score += 1.5
-elif total_value >= 100_000:
-    score += 1
+# Fallback: absolute dollar thresholds  
 else:
-    score += 0.5
+    if total_value >= 5_000_000:   score += 3
+    elif total_value >= 1_000_000: score += 2
+    elif total_value >= 500_000:   score += 1.5
+    elif total_value >= 100_000:   score += 1
+    else:                          score += 0.5
 ```
 
 **Factor 4: Insider Seniority Bonus (0-2 points)**
 ```python
-titles = alert.trades['Title'].str.upper().tolist()
-
-if any('CEO' in t or 'CFO' in t or 'COO' in t or 'CHIEF' in t for t in titles):
-    score += 2  # Top executives
-elif any('VP' in t or 'DIRECTOR' in t or 'PRESIDENT' in t for t in titles):
-    score += 1  # Senior management
-else:
-    score += 0.5  # Other insiders
+if any(CEO/CFO/COO/CHIEF): score += 2
+elif any(VP/DIRECTOR/PRESIDENT): score += 1
+else: score += 0.5
 ```
 
-**Factor 5: Market Cap Multiplier (0.8-1.2x)**
+**Factor 5: Market Cap Multiplier (1.0-1.3x)** — **No mega-cap penalty**
 ```python
-market_cap = context.get('market_cap', 0)
-
-if market_cap < 2_000_000_000:  # <$2B
-    score *= 1.2  # Small cap = higher impact potential
-elif market_cap < 10_000_000_000:  # $2B-$10B
-    score *= 1.1  # Mid cap
-elif market_cap > 100_000_000_000:  # >$100B
-    score *= 0.9  # Mega cap = harder to move
-# else 1.0x (Large cap $10B-$100B)
+if market_cap < 500_000_000:      score *= 1.3   # Micro-cap: highest edge
+elif market_cap < 2_000_000_000:  score *= 1.15  # Small-cap
+elif market_cap < 10_000_000_000: score *= 1.05  # Mid-cap
+else:                             score *= 1.0   # Large/mega: no penalty
 ```
 
 **Factor 6: Short Interest Adjustment (-2 to +1)**
 ```python
-short_pct = context.get('short_interest', 0)
-
-if 5 <= short_pct < 15:
-    score += 1  # Potential squeeze opportunity
-elif short_pct > 30:
-    score -= 2  # Very high risk
-# else 0 (neutral)
+if 5 <= short_pct < 15: score += 1   # Potential squeeze
+elif short_pct > 30:    score -= 2   # Very high risk
 ```
 
 **Factor 7: Bipartisan Bonus (0-1 points)**
+
+**Factor 8: Insider Alpha Calibration (0.8-1.5x)**
+Uses MEDIAN of historical insider performance scores (not MAX). Queries DB for each insider's buy count, avg value, unique tickers, buy-to-sell ratio, repeat conviction.
+
+**Factor 9: Time Decay (0.3-1.0x)**
 ```python
-if 'Bipartisan' in alert.signal_type:
-    score += 1  # Cross-party consensus = rare = bullish
+days_old = (reference_date - trade_date).days
+decay = max(1.0 - 0.10 * days_old, 0.3)  # 10% per day, floor at 30%
+score *= decay
 ```
 
-**Final Score**: `round(score, 2)` → typically 5-20 range, higher = stronger signal
-
-**Example Calculation**:
+**Example Calculation (day-of signal)**:
 ```
-Alert: Trinity Signal, NVDA, $2M insider buys, Sequential pattern, 12-day window
-  Signal Type (Trinity):         10.0
-  Temporal (Sequential + Tight):  5.0  (+3 sequential, +2 tight)
-  Dollar Value ($2M):             2.0
-  Insider Seniority (C-Suite):    2.0
-  Market Cap (Mega $2.8T):      × 0.9 = 17.1
-  Short Interest (8%):           +1.0
-  Bipartisan: No                  0.0
-  ----------------------------------------
-  TOTAL:                         18.1 points (TOP TIER)
+Alert: C-Suite Buy, MSCI, $3M insider buy, CEO
+  Factor 1 (C-Suite Buy):      7.0
+  Factor 3 ($3M absolute):    +2.0
+  Factor 4 (CEO seniority):   +2.0
+  Factor 5 (mid-cap 1.05x):  × 1.05 = 11.55
+  Factor 8 (alpha 1.0x):     × 1.0  = 11.55
+  Factor 9 (0 days, 1.0x):   × 1.0  = 11.55
+  ─────────────────────────────────
+  TOTAL:                      11.6 points
 ```
 
 ---

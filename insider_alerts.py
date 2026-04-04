@@ -3002,94 +3002,59 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
 
 def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
     """
-    Remove duplicate alerts for same ticker when a trade triggers multiple signal types.
-    Keeps only the highest-priority signal per ticker+insider combination.
+    Mutual-exclusion deduplication: keep ONLY the highest-priority signal per ticker.
+    
+    A single corporate event (e.g., CEO buys $600K) can fire C-Suite Buy + Large Single Buy +
+    possibly Cluster Buying. These are NOT independent confirmations — they're the same event.
+    We keep only the strongest signal type per ticker to prevent double-counting.
     
     Priority order (highest to lowest):
-    1. Trinity Signal (NEW - highest conviction)
-    2. Congressional Cluster Buy
-    3. Large Congressional Buy  
-    4. Corporation Purchase
-    5. Cluster Buying
-    6. C-Suite Buy
-    7. Large Single Buy
-    8. Bearish Cluster Selling
-    9. Strategic Investor Buy
-    
-    Args:
-        alerts: List of InsiderAlert objects
-        
-    Returns:
-        Deduplicated list of InsiderAlert objects
+    1. Trinity Signal (3-source convergence)
+    2. Cluster Buying (multiple insiders — strongest single-source)
+    3. C-Suite Buy (executive conviction)
+    4. Congressional Cluster Buy (multiple politicians)
+    5. Congressional Buy (single elite politician)
+    6. Corporation Purchase (strategic investor)
+    7. Large Single Buy (raw dollar amount, no title context)
+    8. Bearish Cluster Selling (sell signal)
     """
     if not alerts:
         return alerts
     
     # Define priority ranking (lower number = higher priority)
     priority_map = {
-        'Congressional Cluster Buy': 1,
-        'Large Congressional Buy': 2,
-        'Corporation Purchase': 3,
-        'Cluster Buying': 4,
-        'C-Suite Buy': 5,
-        'Large Single Buy': 6,
-        'Bearish Cluster Selling': 7,
-        'Strategic Investor Buy': 8,
+        'Trinity Signal': 1,
+        'Cluster Buying': 2,
+        'C-Suite Buy': 3,
+        'Congressional Cluster Buy': 4,
+        'Congressional Buy': 5,
+        'Large Congressional Buy': 5,
+        'Corporation Purchase': 6,
+        'Large Single Buy': 7,
+        'Bearish Cluster Selling': 8,
+        'Strategic Investor Buy': 9,
     }
     
-    # Group alerts by ticker
-    ticker_groups = {}
+    # Keep only the highest-priority signal per ticker
+    best_per_ticker = {}
+    
     for alert in alerts:
         ticker = alert.ticker
-        if ticker not in ticker_groups:
-            ticker_groups[ticker] = []
-        ticker_groups[ticker].append(alert)
-    
-    deduplicated = []
-    
-    for ticker, ticker_alerts in ticker_groups.items():
-        if len(ticker_alerts) == 1:
-            # Only one signal for this ticker, keep it
-            deduplicated.append(ticker_alerts[0])
+        priority = priority_map.get(alert.signal_type, 99)
+        
+        if ticker not in best_per_ticker:
+            best_per_ticker[ticker] = (priority, alert)
         else:
-            # Multiple signals for same ticker - check if they're truly duplicates
-            # Keep clusters (multiple insiders) separate from single-insider signals
-            cluster_alerts = []
-            single_alerts = {}  # key: insider_name -> alert
-            
-            for alert in ticker_alerts:
-                # Cluster signals involve multiple people
-                if 'Cluster' in alert.signal_type:
-                    cluster_alerts.append(alert)
-                else:
-                    # Single-insider signals - track by insider name
-                    if not alert.trades.empty and 'Insider Name' in alert.trades.columns:
-                        insider_name = alert.trades['Insider Name'].iloc[0]
-                        
-                        # If we already have a signal for this insider, keep higher priority one
-                        if insider_name in single_alerts:
-                            existing = single_alerts[insider_name]
-                            existing_priority = priority_map.get(existing.signal_type, 99)
-                            new_priority = priority_map.get(alert.signal_type, 99)
-                            
-                            if new_priority < existing_priority:
-                                single_alerts[insider_name] = alert
-                                logger.debug(f"Replaced {existing.signal_type} with {alert.signal_type} for {ticker} - {insider_name}")
-                        else:
-                            single_alerts[insider_name] = alert
-                    else:
-                        # No insider name found, keep it
-                        single_alerts[f"unknown_{len(single_alerts)}"] = alert
-            
-            # Add all cluster alerts (they represent different groups)
-            deduplicated.extend(cluster_alerts)
-            
-            # Add single-insider alerts (deduplicated per insider)
-            deduplicated.extend(single_alerts.values())
+            existing_priority, existing_alert = best_per_ticker[ticker]
+            if priority < existing_priority:
+                best_per_ticker[ticker] = (priority, alert)
+                logger.debug(f"Mutual exclusion: {ticker} - kept {alert.signal_type} over {existing_alert.signal_type}")
+    
+    deduplicated = [alert for _, alert in best_per_ticker.values()]
     
     removed_count = len(alerts) - len(deduplicated)
     if removed_count > 0:
-        logger.info(f"Removed {removed_count} duplicate signals (same ticker+insider, lower priority)")
+        logger.info(f"Mutual exclusion: removed {removed_count} overlapping signals (1 signal per ticker)")
     
     return deduplicated
 
@@ -3186,81 +3151,74 @@ def calculate_insider_alpha_score(alert: InsiderAlert) -> float:
         if not insider_scores:
             return 1.0
         
-        # Use the best insider's alpha score (the most credible buyer drives the signal)
-        return max(insider_scores)
+        # Use MEDIAN insider alpha (avoids inflating score from one star + many weak insiders)
+        import statistics
+        return round(statistics.median(insider_scores), 3)
     
     except Exception as e:
         logger.warning(f"Could not calculate insider alpha score: {e}")
         return 1.0
 
 
-def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict] = None) -> float:
+def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict] = None, score_date: Optional[datetime] = None) -> float:
     """
     Calculate composite score for signal ranking using multi-factor analysis.
     
+    v2.0 Quant-calibrated scoring:
+    
     Scoring Factors:
-    1. Signal Type Hierarchy (0-10 points)
-       - Trinity Signal: 10
-       - Elite Congressional Cluster: 9
-       - Elite Congressional Buy: 8
-       - Cluster Buying: 7
-       - Corporation Purchase: 7
-       - C-Suite Buy: 6
-       - Large Single Buy: 5
-       - Strategic Investor: 5
-       - Bearish Selling: 3
+    1. Signal Type Hierarchy (0-10 points) — Tier 1 (>=7) vs Tier 2 (<7)
+       - Trinity Signal: 10 (3-source convergence)
+       - Cluster Buying: 8 (strongest single-source)
+       - C-Suite Buy: 7 (executive conviction)
+       - Congressional Cluster: 6 (watchlist)
+       - Corporation Purchase: 5 (watchlist)
+       - Large Single Buy: 4 (watchlist)
     
-    2. Temporal Convergence Bonus (0-3 points)
-       - Sequential pattern (Congress → Insider → Fund): +3
-       - Tight window (<14 days): +2
-       - Concurrent buying: +1
+    2. Temporal Convergence Bonus (0-3 points, Trinity only)
     
-    3. Dollar Value Score (0-3 points)
-       - $5M+: 3
-       - $1M-$5M: 2
-       - $500K-$1M: 1.5
-       - $100K-$500K: 1
-       - <$100K: 0.5
+    3. Dollar Value Score (0-3 points, market-cap-normalized when available)
+       - Uses % of market cap instead of absolute dollars
+       - Fallback to absolute thresholds when market cap unavailable
     
     4. Insider Seniority Bonus (0-2 points)
-       - CEO/CFO/COO: +2
-       - VP/Director: +1
-       - Other: +0.5
     
-    5. Market Cap Multiplier (0.8-1.2x)
-       - Small cap (<$2B): 1.2x (higher beta, more impact)
-       - Mid cap ($2B-$10B): 1.1x
-       - Large cap ($10B-$100B): 1.0x
-       - Mega cap (>$100B): 0.9x (harder to move)
+    5. Market Cap Multiplier (1.0-1.3x) — no mega-cap penalty
+       - Micro-cap (<$500M): 1.3x
+       - Small-cap (<$2B): 1.15x  
+       - Mid-cap (<$10B): 1.05x
+       - Large/Mega-cap: 1.0x (no penalty)
     
     6. Short Interest Adjustment (-2 to +1)
-       - <5%: 0 (neutral)
-       - 5-15%: +1 (potential squeeze)
-       - 15-30%: 0 (risky)
-       - >30%: -2 (very risky)
+    7. Bipartisan Bonus (0-1)
+    8. Insider Alpha Calibration (0.8-1.5x, uses MEDIAN not MAX)
+    9. Time Decay (10% per day, floor 0.3x)
     
-    7. Bipartisan Bonus (0-1 points)
-       - Bipartisan Congressional: +1
+    Args:
+        alert: InsiderAlert object to score
+        context: Optional market context dict (market_cap, short_interest, etc.)
+        score_date: Reference date for time decay calculation. Defaults to now().
+                    Pass the signal's trade date for backtesting (decay = 0).
     
     Returns:
-        Float score (typically 5-20 range, higher = stronger signal)
+        Float score (typically 3-20 range, higher = stronger signal)
     """
     score = 0.0
     
-    # 1. Signal Type Hierarchy
+    # 1. Signal Type Hierarchy (Tier 1 = core alertable, Tier 2 = watchlist only)
+    # Tier 1 (>=7): Trinity, Cluster Buying, C-Suite Buy — these get alerted
+    # Tier 2 (<7): Corporation Purchase, Large Single Buy, Congressional, Bearish — watchlist/log only
     signal_type_scores = {
-        'Trinity Signal': 10,
-        'Congressional Cluster Buy': 9,
-        'Investment Fund Buy': 8.5,
-        'Congressional Buy': 8,
-        'Cluster Buying': 7,
-        'C-Suite Buy': 6,
-        'First Buy in 12 Months': 6,
-        'Corporation Purchase': 5,
-        'Large Single Buy': 5,
-        'Bearish Cluster Selling': 3,
+        'Trinity Signal': 10,              # Tier 1: Highest conviction (3-source convergence)
+        'Cluster Buying': 8,               # Tier 1: Strongest single-source signal
+        'C-Suite Buy': 7,                  # Tier 1: CEO/CFO direct conviction
+        'Congressional Cluster Buy': 6,    # Tier 2: Watchlist (unvalidated elite list)
+        'Congressional Buy': 5.5,          # Tier 2: Watchlist
+        'Corporation Purchase': 5,         # Tier 2: Watchlist
+        'Large Single Buy': 4,             # Tier 2: Watchlist (no title context)
+        'Bearish Cluster Selling': 3,      # Tier 2: Watchlist (sell signals noisy)
     }
-    score += signal_type_scores.get(alert.signal_type, 4)
+    score += signal_type_scores.get(alert.signal_type, 3)
     
     # 2. Temporal Convergence Bonus (for Trinity Signals)
     if alert.signal_type == 'Trinity Signal' and alert.details:
@@ -3278,7 +3236,7 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
         if convergence_score >= 9:
             score += 1
     
-    # 3. Dollar Value Score
+    # 3. Dollar Value Score (market-cap-normalized when possible)
     total_value = 0
     if not alert.trades.empty and 'Value ($)' in alert.trades.columns:
         total_value = alert.trades['Value ($)'].sum()
@@ -3287,16 +3245,30 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
     elif alert.details and 'insider_value' in alert.details:
         total_value = alert.details['insider_value']
     
-    if total_value >= 5_000_000:
-        score += 3
-    elif total_value >= 1_000_000:
-        score += 2
-    elif total_value >= 500_000:
-        score += 1.5
-    elif total_value >= 100_000:
-        score += 1
+    market_cap = context.get('market_cap', 0) if context else 0
+    if market_cap and market_cap > 0 and total_value > 0:
+        # Market-cap-normalized scoring: % of company bought
+        value_pct = (total_value / market_cap) * 100
+        if value_pct >= 0.1:       # 0.1%+ of market cap = massive
+            score += 3
+        elif value_pct >= 0.01:    # 0.01%+ = significant
+            score += 2
+        elif value_pct >= 0.001:   # 0.001%+ = notable
+            score += 1.5
+        else:
+            score += 0.5           # Trivial relative to company size
     else:
-        score += 0.5
+        # Fallback to absolute value when market cap unavailable
+        if total_value >= 5_000_000:
+            score += 3
+        elif total_value >= 1_000_000:
+            score += 2
+        elif total_value >= 500_000:
+            score += 1.5
+        elif total_value >= 100_000:
+            score += 1
+        else:
+            score += 0.5
     
     # 4. Insider Seniority Bonus
     if not alert.trades.empty and 'Title' in alert.trades.columns:
@@ -3309,15 +3281,21 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
             score += 0.5
     
     # 5. Market Cap Multiplier (applied if context available)
+    # Small-cap insider buys have higher alpha but more noise
+    # Mega-cap buys are under extreme scrutiny = genuine conviction signal
     if context and 'market_cap' in context:
         market_cap = context['market_cap']
-        if market_cap < 2_000_000_000:  # <$2B
-            score *= 1.2
-        elif market_cap < 10_000_000_000:  # $2B-$10B
-            score *= 1.1
-        elif market_cap > 100_000_000_000:  # >$100B
-            score *= 0.9
-        # Else 1.0x (no change)
+        if market_cap and market_cap > 0:
+            if market_cap < 500_000_000:        # <$500M micro-cap
+                score *= 1.3                    # Highest edge but noisy
+            elif market_cap < 2_000_000_000:    # $500M-$2B small-cap
+                score *= 1.15
+            elif market_cap < 10_000_000_000:   # $2B-$10B mid-cap
+                score *= 1.05
+            elif market_cap <= 100_000_000_000:  # $10B-$100B large-cap
+                score *= 1.0                    # Baseline
+            else:                               # >$100B mega-cap
+                score *= 1.0                    # No penalty — high scrutiny = genuine signal
     
     # 6. Short Interest Adjustment
     if context and 'short_interest' in context:
@@ -3340,6 +3318,31 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
     if alpha_multiplier != 1.0:
         logger.debug(f"  Insider alpha calibration for {alert.ticker}: {alpha_multiplier:.2f}x")
         score *= alpha_multiplier
+    
+    # 9. Time Decay (signals lose 10% of score per day after detection)
+    # A 5-day-old signal is 50% as valuable as a fresh one
+    try:
+        trade_date = None
+        if not alert.trades.empty:
+            if 'Trade Date' in alert.trades.columns:
+                trade_date = pd.to_datetime(alert.trades['Trade Date']).max()
+            elif 'Published Date' in alert.trades.columns:
+                trade_date = pd.to_datetime(alert.trades['Published Date']).max()
+        
+        if trade_date is not None and pd.notna(trade_date):
+            if hasattr(trade_date, 'to_pydatetime'):
+                trade_date = trade_date.to_pydatetime().replace(tzinfo=None)
+            elif isinstance(trade_date, str):
+                trade_date = datetime.strptime(trade_date, "%Y-%m-%d")
+            
+            ref_date = score_date if score_date is not None else datetime.now()
+            days_old = (ref_date - trade_date).days
+            if days_old > 0:
+                decay_factor = max(1.0 - (0.10 * days_old), 0.3)  # Floor at 30%
+                score *= decay_factor
+                logger.debug(f"  Time decay for {alert.ticker}: {days_old}d old, {decay_factor:.2f}x")
+    except Exception:
+        pass  # Don't fail scoring on date parsing errors
     
     return round(score, 2)
 
