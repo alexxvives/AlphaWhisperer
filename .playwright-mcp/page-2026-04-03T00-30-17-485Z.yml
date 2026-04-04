@@ -1,0 +1,757 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - navigation [ref=e5]:
+        - generic [ref=e6]:
+          - link "Go to site's root page." [ref=e8] [cursor=pointer]:
+            - /url: /
+            - img [ref=e9]
+          - generic [ref=e14]: Capitol Trades
+        - generic [ref=e15]:
+          - link "Trades" [ref=e16] [cursor=pointer]:
+            - /url: /trades
+          - link "Politicians" [ref=e17] [cursor=pointer]:
+            - /url: /politicians
+          - link "Issuers" [ref=e18] [cursor=pointer]:
+            - /url: /issuers
+          - link "Insights" [ref=e19] [cursor=pointer]:
+            - /url: /articles
+          - link "Buzz" [ref=e20] [cursor=pointer]:
+            - /url: /buzz
+          - link "Press" [ref=e21] [cursor=pointer]:
+            - /url: /press
+          - link "More More" [ref=e22] [cursor=pointer]:
+            - /url: "#"
+            - generic [ref=e23]:
+              - text: More
+              - img [ref=e24]
+            - generic [ref=e26]: More
+    - main [ref=e27]:
+      - main [ref=e28]:
+        - generic [ref=e29]:
+          - img [ref=e30]
+          - heading "trades" [level=1] [ref=e32]
+          - generic [ref=e35]:
+            - generic [ref=e36]: 3 YEARS
+            - img [ref=e38]
+          - link "Clear 1 Filter" [ref=e40] [cursor=pointer]:
+            - /url: /trades?
+          - img [ref=e45]
+        - generic [ref=e47]:
+          - generic [ref=e48]:
+            - generic [ref=e51]:
+              - textbox "Find by politician" [ref=e52]
+              - img [ref=e54]
+            - generic [ref=e57]:
+              - generic [ref=e58]: Political Party
+              - img [ref=e60]
+            - generic [ref=e64]:
+              - textbox "Find by issuer" [ref=e65]
+              - img [ref=e67]
+            - generic [ref=e70]:
+              - generic [ref=e71]: Asset Type
+              - img [ref=e73]
+            - generic [ref=e76]:
+              - generic [ref=e77]: Transaction Type
+              - img [ref=e79]
+            - generic [ref=e82]:
+              - generic [ref=e83]: Trade Size
+              - img [ref=e85]
+            - generic [ref=e88]:
+              - generic [ref=e89]: Transaction Label
+              - img [ref=e91]
+            - generic [ref=e94]:
+              - generic [ref=e95]: Sector
+              - img [ref=e97]
+          - generic [ref=e99]:
+            - generic [ref=e100]:
+              - generic [ref=e101]:
+                - generic [ref=e102]: 35,052
+                - generic [ref=e103]: Trades
+              - figure [ref=e104]
+            - generic [ref=e106]:
+              - generic [ref=e107]:
+                - generic [ref=e108]: 1,728
+                - generic [ref=e109]: Filings
+              - figure [ref=e110]
+            - generic [ref=e112]:
+              - generic [ref=e113]:
+                - generic [ref=e114]: $2.317B
+                - generic [ref=e115]: Volume
+              - figure [ref=e116]
+            - generic [ref=e118]:
+              - generic [ref=e119]:
+                - generic [ref=e120]: "200"
+                - generic [ref=e121]: Politicians
+              - figure [ref=e122]
+            - generic [ref=e124]:
+              - generic [ref=e125]:
+                - generic [ref=e126]: 3,109
+                - generic [ref=e127]: Issuers
+              - figure [ref=e128]
+          - generic [ref=e130]:
+            - table [ref=e133]:
+              - rowgroup [ref=e134]:
+                - row "Politician Traded Issuer Published Traded Filed After Owner Type Size Price" [ref=e135]:
+                  - columnheader "Politician" [ref=e136]:
+                    - generic [ref=e137]:
+                      - generic [ref=e138]: Politician
+                      - button [ref=e139] [cursor=pointer]:
+                        - img [ref=e140]
+                  - columnheader "Traded Issuer" [ref=e143]:
+                    - generic [ref=e144]:
+                      - generic [ref=e145]: Traded Issuer
+                      - button [ref=e146] [cursor=pointer]:
+                        - img [ref=e147]
+                  - columnheader "Published" [ref=e150]:
+                    - generic [ref=e151]:
+                      - generic [ref=e152]: Published
+                      - button [ref=e153] [cursor=pointer]:
+                        - img [ref=e154]
+                  - columnheader "Traded" [ref=e157]:
+                    - generic [ref=e158]:
+                      - generic [ref=e159]: Traded
+                      - button [ref=e160] [cursor=pointer]:
+                        - img [ref=e161]
+                  - columnheader "Filed After" [ref=e164]:
+                    - generic [ref=e165]:
+                      - generic [ref=e166]: Filed After
+                      - button [ref=e167] [cursor=pointer]:
+                        - img [ref=e168]
+                  - columnheader "Owner" [ref=e171]:
+                    - generic [ref=e172]:
+                      - generic [ref=e173]: Owner
+                      - button [ref=e174] [cursor=pointer]:
+                        - img [ref=e175]
+                  - columnheader "Type" [ref=e178]:
+                    - generic [ref=e179]:
+                      - generic [ref=e180]: Type
+                      - button [ref=e181] [cursor=pointer]:
+                        - img [ref=e182]
+                  - columnheader "Size" [ref=e185]:
+                    - generic [ref=e186]:
+                      - generic [ref=e187]: Size
+                      - button [ref=e188] [cursor=pointer]:
+                        - img [ref=e189]
+                  - columnheader "Price" [ref=e192]:
+                    - generic [ref=e193]:
+                      - generic [ref=e194]: Price
+                      - button [ref=e195] [cursor=pointer]:
+                        - img [ref=e196]
+                  - columnheader [ref=e199]:
+                    - button [ref=e201] [cursor=pointer]:
+                      - img [ref=e202]
+              - rowgroup [ref=e204]:
+                - row "Tina Smith Democrat|Senate|MN 3M Co MMM:US 13:15 Today 30 Mar 2026 days 2 Spouse sell 50K–100K $145.23 Goto trade detail page." [ref=e205]:
+                  - cell "Tina Smith Democrat|Senate|MN" [ref=e206]:
+                    - generic [ref=e209]:
+                      - heading "Tina Smith" [level=2] [ref=e210]:
+                        - link "Tina Smith" [ref=e211] [cursor=pointer]:
+                          - /url: /politicians/S001203
+                      - generic [ref=e212]: Democrat|Senate|MN
+                  - cell "3M Co MMM:US" [ref=e213]:
+                    - generic [ref=e215]:
+                      - figure [ref=e216]: "3"
+                      - generic [ref=e218]:
+                        - heading "3M Co" [level=3] [ref=e219]:
+                          - link "3M Co" [ref=e220] [cursor=pointer]:
+                            - /url: /issuers/429428
+                        - generic [ref=e221]: MMM:US
+                  - cell "13:15 Today" [ref=e222]:
+                    - generic [ref=e224]:
+                      - generic [ref=e225]: 13:15
+                      - generic [ref=e226]: Today
+                  - cell "30 Mar 2026" [ref=e227]:
+                    - generic [ref=e229]:
+                      - generic [ref=e230]: 30 Mar
+                      - generic [ref=e231]: "2026"
+                  - cell "days 2" [ref=e232]:
+                    - generic [ref=e234]:
+                      - generic [ref=e235]: days
+                      - generic [ref=e236]: "2"
+                  - cell "Spouse" [ref=e237]:
+                    - generic [ref=e242]: Spouse
+                  - cell "sell" [ref=e243]:
+                    - generic [ref=e245]: sell
+                  - cell "50K–100K" [ref=e246]:
+                    - generic [ref=e251]:
+                      - generic [ref=e252]:
+                        - img [ref=e254]
+                        - img [ref=e257]
+                        - img [ref=e260]
+                      - generic [ref=e262]: 50K–100K
+                  - cell "$145.23" [ref=e263]:
+                    - generic [ref=e265]: $145.23
+                  - cell "Goto trade detail page." [ref=e266]:
+                    - button "Goto trade detail page." [ref=e268] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e269]:
+                        - /url: /trades/10000064809
+                        - generic [ref=e270]: Goto trade detail page.
+                        - img [ref=e271]
+                - row "Tina Smith Democrat|Senate|MN Berkshire Hathaway Inc BRK/B:US 13:15 Today 30 Mar 2026 days 2 Spouse sell 100K–250K $479.20 Goto trade detail page." [ref=e273]:
+                  - cell "Tina Smith Democrat|Senate|MN" [ref=e274]:
+                    - generic [ref=e277]:
+                      - heading "Tina Smith" [level=2] [ref=e278]:
+                        - link "Tina Smith" [ref=e279] [cursor=pointer]:
+                          - /url: /politicians/S001203
+                      - generic [ref=e280]: Democrat|Senate|MN
+                  - cell "Berkshire Hathaway Inc BRK/B:US" [ref=e281]:
+                    - generic [ref=e283]:
+                      - figure [ref=e284]: B
+                      - generic [ref=e286]:
+                        - heading "Berkshire Hathaway Inc" [level=3] [ref=e287]:
+                          - link "Berkshire Hathaway Inc" [ref=e288] [cursor=pointer]:
+                            - /url: /issuers/2264488
+                        - generic [ref=e289]: BRK/B:US
+                  - cell "13:15 Today" [ref=e290]:
+                    - generic [ref=e292]:
+                      - generic [ref=e293]: 13:15
+                      - generic [ref=e294]: Today
+                  - cell "30 Mar 2026" [ref=e295]:
+                    - generic [ref=e297]:
+                      - generic [ref=e298]: 30 Mar
+                      - generic [ref=e299]: "2026"
+                  - cell "days 2" [ref=e300]:
+                    - generic [ref=e302]:
+                      - generic [ref=e303]: days
+                      - generic [ref=e304]: "2"
+                  - cell "Spouse" [ref=e305]:
+                    - generic [ref=e310]: Spouse
+                  - cell "sell" [ref=e311]:
+                    - generic [ref=e313]: sell
+                  - cell "100K–250K" [ref=e314]:
+                    - generic [ref=e319]:
+                      - generic [ref=e320]:
+                        - img [ref=e322]
+                        - img [ref=e325]
+                        - img [ref=e328]
+                      - generic [ref=e330]: 100K–250K
+                  - cell "$479.20" [ref=e331]:
+                    - generic [ref=e333]: $479.20
+                  - cell "Goto trade detail page." [ref=e334]:
+                    - button "Goto trade detail page." [ref=e336] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e337]:
+                        - /url: /trades/10000064810
+                        - generic [ref=e338]: Goto trade detail page.
+                        - img [ref=e339]
+                - row "Mark Alford Republican|House|MO Amazon.com Inc AMZN:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K $211.74 Goto trade detail page." [ref=e341]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e342]:
+                    - generic [ref=e345]:
+                      - heading "Mark Alford" [level=2] [ref=e346]:
+                        - link "Mark Alford" [ref=e347] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e348]: Republican|House|MO
+                  - cell "Amazon.com Inc AMZN:US" [ref=e349]:
+                    - generic [ref=e351]:
+                      - figure [ref=e352]: A
+                      - generic [ref=e354]:
+                        - heading "Amazon.com Inc" [level=3] [ref=e355]:
+                          - link "Amazon.com Inc" [ref=e356] [cursor=pointer]:
+                            - /url: /issuers/429648
+                        - generic [ref=e357]: AMZN:US
+                  - cell "09:01 Yesterday" [ref=e358]:
+                    - generic [ref=e360]:
+                      - generic [ref=e361]: 09:01
+                      - generic [ref=e362]: Yesterday
+                  - cell "15 Mar 2026" [ref=e363]:
+                    - generic [ref=e365]:
+                      - generic [ref=e366]: 15 Mar
+                      - generic [ref=e367]: "2026"
+                  - cell "days 15" [ref=e368]:
+                    - generic [ref=e370]:
+                      - generic [ref=e371]: days
+                      - generic [ref=e372]: "15"
+                  - cell "Undisclosed" [ref=e373]:
+                    - generic [ref=e378]: Undisclosed
+                  - cell "sell*" [ref=e379]:
+                    - generic [ref=e382]: sell*
+                  - cell "1K–15K" [ref=e383]:
+                    - generic [ref=e388]:
+                      - generic [ref=e389]:
+                        - img [ref=e391]
+                        - img [ref=e394]
+                        - img [ref=e397]
+                      - generic [ref=e399]: 1K–15K
+                  - cell "$211.74" [ref=e400]:
+                    - generic [ref=e402]: $211.74
+                  - cell "Goto trade detail page." [ref=e403]:
+                    - button "Goto trade detail page." [ref=e405] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e406]:
+                        - /url: /trades/20003796414
+                        - generic [ref=e407]: Goto trade detail page.
+                        - img [ref=e408]
+                - row "Mark Alford Republican|House|MO Apple Inc AAPL:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K $252.82 Goto trade detail page." [ref=e410]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e411]:
+                    - generic [ref=e414]:
+                      - heading "Mark Alford" [level=2] [ref=e415]:
+                        - link "Mark Alford" [ref=e416] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e417]: Republican|House|MO
+                  - cell "Apple Inc AAPL:US" [ref=e418]:
+                    - generic [ref=e420]:
+                      - figure [ref=e421]: A
+                      - generic [ref=e423]:
+                        - heading "Apple Inc" [level=3] [ref=e424]:
+                          - link "Apple Inc" [ref=e425] [cursor=pointer]:
+                            - /url: /issuers/429789
+                        - generic [ref=e426]: AAPL:US
+                  - cell "09:01 Yesterday" [ref=e427]:
+                    - generic [ref=e429]:
+                      - generic [ref=e430]: 09:01
+                      - generic [ref=e431]: Yesterday
+                  - cell "15 Mar 2026" [ref=e432]:
+                    - generic [ref=e434]:
+                      - generic [ref=e435]: 15 Mar
+                      - generic [ref=e436]: "2026"
+                  - cell "days 15" [ref=e437]:
+                    - generic [ref=e439]:
+                      - generic [ref=e440]: days
+                      - generic [ref=e441]: "15"
+                  - cell "Undisclosed" [ref=e442]:
+                    - generic [ref=e447]: Undisclosed
+                  - cell "sell*" [ref=e448]:
+                    - generic [ref=e451]: sell*
+                  - cell "1K–15K" [ref=e452]:
+                    - generic [ref=e457]:
+                      - generic [ref=e458]:
+                        - img [ref=e460]
+                        - img [ref=e463]
+                        - img [ref=e466]
+                      - generic [ref=e468]: 1K–15K
+                  - cell "$252.82" [ref=e469]:
+                    - generic [ref=e471]: $252.82
+                  - cell "Goto trade detail page." [ref=e472]:
+                    - button "Goto trade detail page." [ref=e474] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e475]:
+                        - /url: /trades/20003796415
+                        - generic [ref=e476]: Goto trade detail page.
+                        - img [ref=e477]
+                - row "Mark Alford Republican|House|MO AT&T Inc T:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K $27.73 Goto trade detail page." [ref=e479]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e480]:
+                    - generic [ref=e483]:
+                      - heading "Mark Alford" [level=2] [ref=e484]:
+                        - link "Mark Alford" [ref=e485] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e486]: Republican|House|MO
+                  - cell "AT&T Inc T:US" [ref=e487]:
+                    - generic [ref=e489]:
+                      - figure [ref=e490]: A
+                      - generic [ref=e492]:
+                        - heading "AT&T Inc" [level=3] [ref=e493]:
+                          - link "AT&T Inc" [ref=e494] [cursor=pointer]:
+                            - /url: /issuers/429914
+                        - generic [ref=e495]: T:US
+                  - cell "09:01 Yesterday" [ref=e496]:
+                    - generic [ref=e498]:
+                      - generic [ref=e499]: 09:01
+                      - generic [ref=e500]: Yesterday
+                  - cell "15 Mar 2026" [ref=e501]:
+                    - generic [ref=e503]:
+                      - generic [ref=e504]: 15 Mar
+                      - generic [ref=e505]: "2026"
+                  - cell "days 15" [ref=e506]:
+                    - generic [ref=e508]:
+                      - generic [ref=e509]: days
+                      - generic [ref=e510]: "15"
+                  - cell "Undisclosed" [ref=e511]:
+                    - generic [ref=e516]: Undisclosed
+                  - cell "sell*" [ref=e517]:
+                    - generic [ref=e520]: sell*
+                  - cell "1K–15K" [ref=e521]:
+                    - generic [ref=e526]:
+                      - generic [ref=e527]:
+                        - img [ref=e529]
+                        - img [ref=e532]
+                        - img [ref=e535]
+                      - generic [ref=e537]: 1K–15K
+                  - cell "$27.73" [ref=e538]:
+                    - generic [ref=e540]: $27.73
+                  - cell "Goto trade detail page." [ref=e541]:
+                    - button "Goto trade detail page." [ref=e543] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e544]:
+                        - /url: /trades/20003796416
+                        - generic [ref=e545]: Goto trade detail page.
+                        - img [ref=e546]
+                - row "Mark Alford Republican|House|MO Berkshire Hathaway Inc BRK/B:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K $492.21 Goto trade detail page." [ref=e548]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e549]:
+                    - generic [ref=e552]:
+                      - heading "Mark Alford" [level=2] [ref=e553]:
+                        - link "Mark Alford" [ref=e554] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e555]: Republican|House|MO
+                  - cell "Berkshire Hathaway Inc BRK/B:US" [ref=e556]:
+                    - generic [ref=e558]:
+                      - figure [ref=e559]: B
+                      - generic [ref=e561]:
+                        - heading "Berkshire Hathaway Inc" [level=3] [ref=e562]:
+                          - link "Berkshire Hathaway Inc" [ref=e563] [cursor=pointer]:
+                            - /url: /issuers/2264488
+                        - generic [ref=e564]: BRK/B:US
+                  - cell "09:01 Yesterday" [ref=e565]:
+                    - generic [ref=e567]:
+                      - generic [ref=e568]: 09:01
+                      - generic [ref=e569]: Yesterday
+                  - cell "15 Mar 2026" [ref=e570]:
+                    - generic [ref=e572]:
+                      - generic [ref=e573]: 15 Mar
+                      - generic [ref=e574]: "2026"
+                  - cell "days 15" [ref=e575]:
+                    - generic [ref=e577]:
+                      - generic [ref=e578]: days
+                      - generic [ref=e579]: "15"
+                  - cell "Undisclosed" [ref=e580]:
+                    - generic [ref=e585]: Undisclosed
+                  - cell "sell*" [ref=e586]:
+                    - generic [ref=e589]: sell*
+                  - cell "1K–15K" [ref=e590]:
+                    - generic [ref=e595]:
+                      - generic [ref=e596]:
+                        - img [ref=e598]
+                        - img [ref=e601]
+                        - img [ref=e604]
+                      - generic [ref=e606]: 1K–15K
+                  - cell "$492.21" [ref=e607]:
+                    - generic [ref=e609]: $492.21
+                  - cell "Goto trade detail page." [ref=e610]:
+                    - button "Goto trade detail page." [ref=e612] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e613]:
+                        - /url: /trades/20003796417
+                        - generic [ref=e614]: Goto trade detail page.
+                        - img [ref=e615]
+                - row "Mark Alford Republican|House|MO SPDR DOW JONES INDUSTRIAL AVERAGE ETF TRUST DIA:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K N/A Goto trade detail page." [ref=e617]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e618]:
+                    - generic [ref=e621]:
+                      - heading "Mark Alford" [level=2] [ref=e622]:
+                        - link "Mark Alford" [ref=e623] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e624]: Republican|House|MO
+                  - cell "SPDR DOW JONES INDUSTRIAL AVERAGE ETF TRUST DIA:US" [ref=e625]:
+                    - generic [ref=e627]:
+                      - figure [ref=e628]: S
+                      - generic [ref=e630]:
+                        - heading "SPDR DOW JONES INDUSTRIAL AVERAGE ETF TRUST" [level=3] [ref=e631]:
+                          - link "SPDR DOW JONES INDUSTRIAL AVERAGE ETF TRUST" [ref=e632] [cursor=pointer]:
+                            - /url: /issuers/2335059
+                        - generic [ref=e633]: DIA:US
+                  - cell "09:01 Yesterday" [ref=e634]:
+                    - generic [ref=e636]:
+                      - generic [ref=e637]: 09:01
+                      - generic [ref=e638]: Yesterday
+                  - cell "15 Mar 2026" [ref=e639]:
+                    - generic [ref=e641]:
+                      - generic [ref=e642]: 15 Mar
+                      - generic [ref=e643]: "2026"
+                  - cell "days 15" [ref=e644]:
+                    - generic [ref=e646]:
+                      - generic [ref=e647]: days
+                      - generic [ref=e648]: "15"
+                  - cell "Undisclosed" [ref=e649]:
+                    - generic [ref=e654]: Undisclosed
+                  - cell "sell*" [ref=e655]:
+                    - generic [ref=e658]: sell*
+                  - cell "1K–15K" [ref=e659]:
+                    - generic [ref=e664]:
+                      - generic [ref=e665]:
+                        - img [ref=e667]
+                        - img [ref=e670]
+                        - img [ref=e673]
+                      - generic [ref=e675]: 1K–15K
+                  - cell "N/A" [ref=e676]:
+                    - generic [ref=e678]: N/A
+                  - cell "Goto trade detail page." [ref=e679]:
+                    - button "Goto trade detail page." [ref=e681] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e682]:
+                        - /url: /trades/20003796418
+                        - generic [ref=e683]: Goto trade detail page.
+                        - img [ref=e684]
+                - row "Mark Alford Republican|House|MO Invesco QQQ Trust Series 1 QQQ:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K $600.38 Goto trade detail page." [ref=e686]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e687]:
+                    - generic [ref=e690]:
+                      - heading "Mark Alford" [level=2] [ref=e691]:
+                        - link "Mark Alford" [ref=e692] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e693]: Republican|House|MO
+                  - cell "Invesco QQQ Trust Series 1 QQQ:US" [ref=e694]:
+                    - generic [ref=e696]:
+                      - figure [ref=e697]: I
+                      - generic [ref=e699]:
+                        - heading "Invesco QQQ Trust Series 1" [level=3] [ref=e700]:
+                          - link "Invesco QQQ Trust Series 1" [ref=e701] [cursor=pointer]:
+                            - /url: /issuers/432516
+                        - generic [ref=e702]: QQQ:US
+                  - cell "09:01 Yesterday" [ref=e703]:
+                    - generic [ref=e705]:
+                      - generic [ref=e706]: 09:01
+                      - generic [ref=e707]: Yesterday
+                  - cell "15 Mar 2026" [ref=e708]:
+                    - generic [ref=e710]:
+                      - generic [ref=e711]: 15 Mar
+                      - generic [ref=e712]: "2026"
+                  - cell "days 15" [ref=e713]:
+                    - generic [ref=e715]:
+                      - generic [ref=e716]: days
+                      - generic [ref=e717]: "15"
+                  - cell "Undisclosed" [ref=e718]:
+                    - generic [ref=e723]: Undisclosed
+                  - cell "sell*" [ref=e724]:
+                    - generic [ref=e727]: sell*
+                  - cell "1K–15K" [ref=e728]:
+                    - generic [ref=e733]:
+                      - generic [ref=e734]:
+                        - img [ref=e736]
+                        - img [ref=e739]
+                        - img [ref=e742]
+                      - generic [ref=e744]: 1K–15K
+                  - cell "$600.38" [ref=e745]:
+                    - generic [ref=e747]: $600.38
+                  - cell "Goto trade detail page." [ref=e748]:
+                    - button "Goto trade detail page." [ref=e750] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e751]:
+                        - /url: /trades/20003796419
+                        - generic [ref=e752]: Goto trade detail page.
+                        - img [ref=e753]
+                - row "Mark Alford Republican|House|MO PayPal Holdings Inc PYPL:US 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K $45.42 Goto trade detail page." [ref=e755]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e756]:
+                    - generic [ref=e759]:
+                      - heading "Mark Alford" [level=2] [ref=e760]:
+                        - link "Mark Alford" [ref=e761] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e762]: Republican|House|MO
+                  - cell "PayPal Holdings Inc PYPL:US" [ref=e763]:
+                    - generic [ref=e765]:
+                      - figure [ref=e766]: P
+                      - generic [ref=e768]:
+                        - heading "PayPal Holdings Inc" [level=3] [ref=e769]:
+                          - link "PayPal Holdings Inc" [ref=e770] [cursor=pointer]:
+                            - /url: /issuers/433981
+                        - generic [ref=e771]: PYPL:US
+                  - cell "09:01 Yesterday" [ref=e772]:
+                    - generic [ref=e774]:
+                      - generic [ref=e775]: 09:01
+                      - generic [ref=e776]: Yesterday
+                  - cell "15 Mar 2026" [ref=e777]:
+                    - generic [ref=e779]:
+                      - generic [ref=e780]: 15 Mar
+                      - generic [ref=e781]: "2026"
+                  - cell "days 15" [ref=e782]:
+                    - generic [ref=e784]:
+                      - generic [ref=e785]: days
+                      - generic [ref=e786]: "15"
+                  - cell "Undisclosed" [ref=e787]:
+                    - generic [ref=e792]: Undisclosed
+                  - cell "sell*" [ref=e793]:
+                    - generic [ref=e796]: sell*
+                  - cell "1K–15K" [ref=e797]:
+                    - generic [ref=e802]:
+                      - generic [ref=e803]:
+                        - img [ref=e805]
+                        - img [ref=e808]
+                        - img [ref=e811]
+                      - generic [ref=e813]: 1K–15K
+                  - cell "$45.42" [ref=e814]:
+                    - generic [ref=e816]: $45.42
+                  - cell "Goto trade detail page." [ref=e817]:
+                    - button "Goto trade detail page." [ref=e819] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e820]:
+                        - /url: /trades/20003796420
+                        - generic [ref=e821]: Goto trade detail page.
+                        - img [ref=e822]
+                - row "Mark Alford Republican|House|MO SPDR S&P 500 BUYBACK ETF N/A 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K N/A Goto trade detail page." [ref=e824]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e825]:
+                    - generic [ref=e828]:
+                      - heading "Mark Alford" [level=2] [ref=e829]:
+                        - link "Mark Alford" [ref=e830] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e831]: Republican|House|MO
+                  - cell "SPDR S&P 500 BUYBACK ETF N/A" [ref=e832]:
+                    - generic [ref=e834]:
+                      - figure [ref=e835]: S
+                      - generic [ref=e837]:
+                        - heading "SPDR S&P 500 BUYBACK ETF" [level=3] [ref=e838]:
+                          - link "SPDR S&P 500 BUYBACK ETF" [ref=e839] [cursor=pointer]:
+                            - /url: /issuers/2335369
+                        - generic [ref=e840]: N/A
+                  - cell "09:01 Yesterday" [ref=e841]:
+                    - generic [ref=e843]:
+                      - generic [ref=e844]: 09:01
+                      - generic [ref=e845]: Yesterday
+                  - cell "15 Mar 2026" [ref=e846]:
+                    - generic [ref=e848]:
+                      - generic [ref=e849]: 15 Mar
+                      - generic [ref=e850]: "2026"
+                  - cell "days 15" [ref=e851]:
+                    - generic [ref=e853]:
+                      - generic [ref=e854]: days
+                      - generic [ref=e855]: "15"
+                  - cell "Undisclosed" [ref=e856]:
+                    - generic [ref=e861]: Undisclosed
+                  - cell "sell*" [ref=e862]:
+                    - generic [ref=e865]: sell*
+                  - cell "1K–15K" [ref=e866]:
+                    - generic [ref=e871]:
+                      - generic [ref=e872]:
+                        - img [ref=e874]
+                        - img [ref=e877]
+                        - img [ref=e880]
+                      - generic [ref=e882]: 1K–15K
+                  - cell "N/A" [ref=e883]:
+                    - generic [ref=e885]: N/A
+                  - cell "Goto trade detail page." [ref=e886]:
+                    - button "Goto trade detail page." [ref=e888] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e889]:
+                        - /url: /trades/20003796421
+                        - generic [ref=e890]: Goto trade detail page.
+                        - img [ref=e891]
+                - row "Mark Alford Republican|House|MO SPDR S&P 500 BUYBACK ETF N/A 09:01 Yesterday 15 Mar 2026 days 15 Undisclosed sell* 1K–15K N/A Goto trade detail page." [ref=e893]:
+                  - cell "Mark Alford Republican|House|MO" [ref=e894]:
+                    - generic [ref=e897]:
+                      - heading "Mark Alford" [level=2] [ref=e898]:
+                        - link "Mark Alford" [ref=e899] [cursor=pointer]:
+                          - /url: /politicians/A000379
+                      - generic [ref=e900]: Republican|House|MO
+                  - cell "SPDR S&P 500 BUYBACK ETF N/A" [ref=e901]:
+                    - generic [ref=e903]:
+                      - figure [ref=e904]: S
+                      - generic [ref=e906]:
+                        - heading "SPDR S&P 500 BUYBACK ETF" [level=3] [ref=e907]:
+                          - link "SPDR S&P 500 BUYBACK ETF" [ref=e908] [cursor=pointer]:
+                            - /url: /issuers/2335369
+                        - generic [ref=e909]: N/A
+                  - cell "09:01 Yesterday" [ref=e910]:
+                    - generic [ref=e912]:
+                      - generic [ref=e913]: 09:01
+                      - generic [ref=e914]: Yesterday
+                  - cell "15 Mar 2026" [ref=e915]:
+                    - generic [ref=e917]:
+                      - generic [ref=e918]: 15 Mar
+                      - generic [ref=e919]: "2026"
+                  - cell "days 15" [ref=e920]:
+                    - generic [ref=e922]:
+                      - generic [ref=e923]: days
+                      - generic [ref=e924]: "15"
+                  - cell "Undisclosed" [ref=e925]:
+                    - generic [ref=e930]: Undisclosed
+                  - cell "sell*" [ref=e931]:
+                    - generic [ref=e934]: sell*
+                  - cell "1K–15K" [ref=e935]:
+                    - generic [ref=e940]:
+                      - generic [ref=e941]:
+                        - img [ref=e943]
+                        - img [ref=e946]
+                        - img [ref=e949]
+                      - generic [ref=e951]: 1K–15K
+                  - cell "N/A" [ref=e952]:
+                    - generic [ref=e954]: N/A
+                  - cell "Goto trade detail page." [ref=e955]:
+                    - button "Goto trade detail page." [ref=e957] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e958]:
+                        - /url: /trades/20003796422
+                        - generic [ref=e959]: Goto trade detail page.
+                        - img [ref=e960]
+                - row "Jared Moskowitz Democrat|House|FL Roper Technologies Inc ROP:US 31 Mar 2026 26 Feb 2026 days 31 Child sell* 1K–15K $349.73 Goto trade detail page." [ref=e962]:
+                  - cell "Jared Moskowitz Democrat|House|FL" [ref=e963]:
+                    - generic [ref=e966]:
+                      - heading "Jared Moskowitz" [level=2] [ref=e967]:
+                        - link "Jared Moskowitz" [ref=e968] [cursor=pointer]:
+                          - /url: /politicians/M001217
+                      - generic [ref=e969]: Democrat|House|FL
+                  - cell "Roper Technologies Inc ROP:US" [ref=e970]:
+                    - generic [ref=e972]:
+                      - figure [ref=e973]: R
+                      - generic [ref=e975]:
+                        - heading "Roper Technologies Inc" [level=3] [ref=e976]:
+                          - link "Roper Technologies Inc" [ref=e977] [cursor=pointer]:
+                            - /url: /issuers/434446
+                        - generic [ref=e978]: ROP:US
+                  - cell "31 Mar 2026" [ref=e979]:
+                    - generic [ref=e981]:
+                      - generic [ref=e982]: 31 Mar
+                      - generic [ref=e983]: "2026"
+                  - cell "26 Feb 2026" [ref=e984]:
+                    - generic [ref=e986]:
+                      - generic [ref=e987]: 26 Feb
+                      - generic [ref=e988]: "2026"
+                  - cell "days 31" [ref=e989]:
+                    - generic [ref=e991]:
+                      - generic [ref=e992]: days
+                      - generic [ref=e993]: "31"
+                  - cell "Child" [ref=e994]:
+                    - generic [ref=e999]: Child
+                  - cell "sell*" [ref=e1000]:
+                    - generic [ref=e1003]: sell*
+                  - cell "1K–15K" [ref=e1004]:
+                    - generic [ref=e1009]:
+                      - generic [ref=e1010]:
+                        - img [ref=e1012]
+                        - img [ref=e1015]
+                        - img [ref=e1018]
+                      - generic [ref=e1020]: 1K–15K
+                  - cell "$349.73" [ref=e1021]:
+                    - generic [ref=e1023]: $349.73
+                  - cell "Goto trade detail page." [ref=e1024]:
+                    - button "Goto trade detail page." [ref=e1026] [cursor=pointer]:
+                      - link "Goto trade detail page." [ref=e1027]:
+                        - /url: /trades/20003796411
+                        - generic [ref=e1028]: Goto trade detail page.
+                        - img [ref=e1029]
+            - generic [ref=e1031]:
+              - generic [ref=e1032]:
+                - button "Go to first page" [disabled]:
+                  - link "Go to first page":
+                    - /url: /trades?ticker=NVDA&page=1
+                    - img
+                - button "Go to previous page" [disabled]:
+                  - link "Go to previous page":
+                    - /url: /trades?ticker=NVDA&page=0
+                    - img
+                - paragraph [ref=e1033]: Page 1 of 2921
+                - button "Go to next page" [ref=e1034] [cursor=pointer]:
+                  - link "Go to next page" [ref=e1035]:
+                    - /url: /trades?ticker=NVDA&page=2
+                    - img [ref=e1036]
+                - button "Go to last page" [ref=e1038] [cursor=pointer]:
+                  - link "Go to last page" [ref=e1039]:
+                    - /url: /trades?ticker=NVDA&page=2921
+                    - img [ref=e1040]
+              - generic [ref=e1042]:
+                - generic [ref=e1043]: Show
+                - generic [ref=e1045]:
+                  - generic [ref=e1046]: "12"
+                  - img [ref=e1048]
+    - contentinfo [ref=e1050]:
+      - generic [ref=e1051]:
+        - generic [ref=e1052]:
+          - link "Go to site's root page." [ref=e1054] [cursor=pointer]:
+            - /url: /
+            - img [ref=e1055]
+          - link "Go to 2iQ Research home page" [ref=e1061] [cursor=pointer]:
+            - /url: https://www.2iqresearch.com/
+        - paragraph [ref=e1063]: "*The historical data available on our website is restricted to the past 3 years."
+        - navigation [ref=e1065]:
+          - link "Follow" [ref=e1066] [cursor=pointer]:
+            - /url: https://twitter.com/capitol2iq
+            - img [ref=e1067]
+            - generic [ref=e1069]: Follow
+          - link "About Us" [ref=e1070] [cursor=pointer]:
+            - /url: /about-us
+          - link "Download PressKit" [ref=e1071] [cursor=pointer]:
+            - /url: https://static.2iq.eu/press/capitoltrades-presskit.zip
+          - link "Sitemap" [ref=e1072] [cursor=pointer]:
+            - /url: /sitemap
+          - link "Privacy Policy" [ref=e1073] [cursor=pointer]:
+            - /url: /privacy-policy
+          - link "Terms & Conditions" [ref=e1074] [cursor=pointer]:
+            - /url: /terms-and-conditions
+          - link "Imprint" [ref=e1075] [cursor=pointer]:
+            - /url: /imprint
+          - link "Disclaimer" [ref=e1076] [cursor=pointer]:
+            - /url: /disclaimer
+        - paragraph [ref=e1077]: © 2026 2iQ Research
+    - generic [ref=e1079]:
+      - generic [ref=e1080]:
+        - heading "This website uses cookies" [level=2] [ref=e1081]
+        - paragraph [ref=e1082]: We use cookies to customize content, provide social media features, and analyze traffic. Your site usage information may be shared with our partners for social media, advertising, and analytics purposes.
+      - generic [ref=e1083]:
+        - button "Accept All" [ref=e1084] [cursor=pointer]
+        - button "Only Analytics" [ref=e1085] [cursor=pointer]
+  - alert [ref=e1086]

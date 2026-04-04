@@ -1307,335 +1307,153 @@ def get_insider_role_description(title: str) -> str:
 
 def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> str:
     """
-    Generate AI-powered insight using GitHub Models (GPT-4o-mini), Ollama, or rule-based fallback.
-    
-    Priority: GitHub Models API → Ollama local → Rule-based analysis
-    
-    Args:
-        alert: InsiderAlert object
-        context: Company context dictionary
-        confidence: Confidence score (1-5)
-        
-    Returns:
-        Detailed insight string with analysis and recommendation
+    Generate AI-powered insight using GitHub Models (GPT-4o-mini) with live web search.
+
+    Requires GITHUB_TOKEN in .env.
+    Falls back to "AI insight not available" if no token or API call fails.
+    Ollama is NOT used (won't be available on server deployments).
+
+    Web context: DuckDuckGo search (free, no API key) fetches fresh news/analysis
+    for the company at alert time and passes it to GPT-4o-mini.
     """
-    # Build context prompt (shared by both LLM backends)
-    prompt = f"""You are a senior hedge fund analyst. Analyze this insider trading signal. Focus on NON-OBVIOUS insights and actionable edge. Be skeptical - insider buying alone doesn't guarantee success.
+
+    def _fetch_web_context(ticker: str, company: str) -> str:
+        """Search DuckDuckGo for recent news/analysis about the company."""
+        try:
+            from duckduckgo_search import DDGS
+            query = f"{ticker} {company} stock news analysis 2025 2026"
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=5, timelimit="m"))  # last month
+            if not results:
+                return ""
+            snippets = []
+            for r in results[:5]:
+                title = r.get("title", "")
+                body = r.get("body", "")[:200]
+                if title:
+                    snippets.append(f"• {title}: {body}")
+            search_block = "\n".join(snippets)
+            logger.debug(f"DuckDuckGo web context for {ticker}: {len(results)} results")
+            return f"\nWEB SEARCH RESULTS (live):\n{search_block}"
+        except Exception as e:
+            logger.debug(f"DuckDuckGo search failed for {ticker}: {e}")
+            return ""
+
+    # --- Build prompt ---
+    prompt = f"""You are a senior hedge fund analyst. Analyze this insider trading signal. Focus on NON-OBVIOUS insights and actionable edge. Be skeptical — insider buying alone doesn't guarantee success.
 
 SIGNAL: {alert.signal_type}
 TICKER: {alert.ticker} ({alert.company_name})
 CONFIDENCE: {confidence}/5
 
 MARKET DATA:"""
-    
-    # Add relevant context
+
     if context.get("sector"):
         prompt += f"\n• Sector: {context['sector']}"
     if context.get("market_cap"):
         mc_billions = context["market_cap"] / 1e9
         prompt += f"\n• Market Cap: ${mc_billions:.1f}B"
     if context.get("price_change_5d"):
-        prompt += f"\n• 5D: {context['price_change_5d']:+.1f}%"
+        prompt += f"\n• 5D price: {context['price_change_5d']:+.1f}%"
     if context.get("price_change_1m"):
-        prompt += f"\n• 1M: {context['price_change_1m']:+.1f}%"
+        prompt += f"\n• 1M price: {context['price_change_1m']:+.1f}%"
     if context.get("short_interest"):
-        si = context['short_interest']*100
-        prompt += f"\n• Short Interest: {si:.1f}%" + (" (SQUEEZE RISK!)" if si > 15 else "")
+        si = context["short_interest"] * 100
+        prompt += f"\n• Short Interest: {si:.1f}%" + (" (SQUEEZE RISK)" if si > 15 else "")
     if context.get("pe_ratio"):
-        pe = context['pe_ratio']
-        pe_note = " (undervalued)" if pe < 15 else " (expensive)" if pe > 30 else ""
-        prompt += f"\n• P/E: {pe:.1f}{pe_note}"
+        pe = context["pe_ratio"]
+        note = " (cheap)" if pe < 15 else " (expensive)" if pe > 30 else ""
+        prompt += f"\n• P/E: {pe:.1f}{note}"
     if context.get("distance_from_52w_low"):
-        prompt += f"\n• From 52W Low: +{context['distance_from_52w_low']:.1f}%"
-    
-    # Congressional alignment - highlight proven track record
-    congressional_trades = context.get("congressional_trades", [])
-    ticker = alert.ticker
+        prompt += f"\n• Above 52W Low: +{context['distance_from_52w_low']:.1f}%"
+
     congressional_buys = [
-        t for t in congressional_trades 
-        if t.get("type", "").upper() in ["BUY", "PURCHASE"] 
-        and t.get("ticker", "").upper() == ticker.upper()
+        t for t in context.get("congressional_trades", [])
+        if t.get("type", "").upper() in ["BUY", "PURCHASE"]
+        and t.get("ticker", "").upper() == alert.ticker.upper()
     ]
     if congressional_buys:
-        politicians = [t.get('politician', 'Unknown') for t in congressional_buys[:2]]
-        prompt += f"\n• 🏛️ **CONGRESSIONAL ALIGNMENT**: {len(congressional_buys)} politicians with proven track records buying ({', '.join(politicians)})"
-        prompt += "\n  NOTE: These are HIGH-CONVICTION traders who consistently outperform the market"
-    
-    # Signal-specific details
-    if "num_insiders" in alert.details:
-        prompt += f"\n• {alert.details['num_insiders']} insiders buying simultaneously"
-        if "total_value" in alert.details:
-            prompt += f" (${alert.details['total_value']:,.0f} total)"
-    if "num_politicians" in alert.details:
-        prompt += f"\n• {alert.details['num_politicians']} politicians"
-        if alert.details.get("bipartisan"):
-            prompt += " (BIPARTISAN - both parties!)"
-    if "investor" in alert.details:
-        prompt += f"\n• Strategic buyer: {alert.details['investor']}"
-    
-    # Add ownership change information
+        pols = [t.get("politician", "Unknown") for t in congressional_buys[:2]]
+        prompt += f"\n• Congressional alignment: {len(congressional_buys)} proven trader(s) ({', '.join(pols)})"
+
     if len(alert.trades) > 0:
+        if "num_insiders" in alert.details:
+            prompt += f"\n• {alert.details['num_insiders']} insiders buying"
+            if "total_value" in alert.details:
+                prompt += f" (${alert.details['total_value']:,.0f} total)"
         if "Delta Own" in alert.trades.columns:
-            delta_values = []
+            deltas = []
             for _, row in alert.trades.iterrows():
-                if pd.notna(row.get("Delta Own")):
-                    delta_own = row["Delta Own"]
-                    if isinstance(delta_own, str) and delta_own.strip():
-                        delta_values.append(delta_own)
-                    elif isinstance(delta_own, (int, float)):
-                        delta_values.append(f"+{delta_own:.1f}%")
-            
-            if delta_values:
-                prompt += f"\n• Ownership Increase: {', '.join(delta_values[:3])} (shows strong conviction)"
-    
-    # Add recent news headlines for context
-    if context.get("news") and len(context["news"]) > 0:
-        prompt += "\n\nRECENT NEWS:"
-        for news_item in context["news"][:3]:
-            prompt += f"\n• {news_item['title']}"
-            if news_item.get('description'):
-                prompt += f"\n  {news_item['description']}"
-    
+                d = row.get("Delta Own")
+                if pd.notna(d) and d:
+                    deltas.append(str(d) if isinstance(d, str) else f"+{d:.1f}%")
+            if deltas:
+                prompt += f"\n• Ownership delta: {', '.join(deltas[:3])}"
+
+    if context.get("news"):
+        prompt += "\n\nRECENT YAHOO NEWS:"
+        for item in context["news"][:3]:
+            prompt += f"\n• {item['title']}"
+
+    # Add live web search context
+    web_ctx = _fetch_web_context(alert.ticker, alert.company_name)
+    if web_ctx:
+        prompt += web_ctx
+
     prompt += """
 
-TASK: Provide sharp, professional analysis formatted in clear paragraphs:
+TASK: Provide sharp, data-driven analysis in under 120 words total.
 
-**KEY INSIGHT** (2-3 sentences):
-What's the non-obvious edge here? Reference P/E, short interest, sector dynamics, and price action. Be critical - insider buying doesn't guarantee success.
+Structure your response as:
+[KEY INSIGHT] What's the non-obvious edge? Reference the actual numbers.
+[CATALYSTS] What could drive this? Be sector-specific.
+[RISKS] What could go wrong? Be honest.
+[VERDICT] STRONG BUY / BUY / HOLD / WAIT — one sentence explaining why, citing specific metrics.
 
-**CATALYSTS** (2 sentences):
-What sector-specific or technical factors could drive this? Be specific to the metrics shown.
+Rules:
+- High P/E (>30) = start cautious
+- Negative 1M price = acknowledge it
+- Congressional alignment = highlight it
+- Web search results = use them to add current context the numbers can't show
+- Never invent data not provided above
+- Complete all sentences within the 120-word limit"""
 
-**RISKS** (2 sentences):
-What could go wrong? Consider valuation, sector headwinds, technical weakness.
-
-**RECOMMENDATION** (100 words maximum):
-Provide a clear, actionable recommendation with detailed reasoning. Explain WHY you're giving this recommendation based on the specific data points. If it's a BUY, explain what makes it attractive. If it's HOLD or WAIT, explain what concerns exist. Be specific - reference the actual numbers (P/E, short interest, price action, etc.). Use STRONG BUY only if metrics are exceptional. Use BUY if solid but not perfect. Use HOLD if mixed signals. Use WAIT if overvalued or weak momentum. Keep response under 100 words but ensure all sentences are complete and provide reasoning.
-
-CRITICAL RULES:
-- Insider buying is just ONE signal - don't automatically recommend STRONG BUY
-- High P/E (>30) should trigger caution
-- Negative price momentum should be acknowledged  
-- Be skeptical and balanced - this is real money
-- If Congressional alignment shows proven traders, emphasize this as a strong signal
-- ALWAYS explain WHY you're giving the recommendation - cite specific metrics
-- Base analysis ONLY on data provided above
-- MAXIMUM 100 WORDS - be thorough but concise, complete all sentences
-
-Format your response with bold section headers and clear paragraph breaks. DO NOT use markdown ** for bold - just write naturally with good structure."""
-    
-    def _clean_llm_response(insight: str) -> str:
-        """Clean up common LLM output artifacts."""
-        prefixes_to_remove = [
-            "Here's the analysis:", "Here is the analysis:",
-            "Analysis:", "Here's my analysis:"
-        ]
-        for prefix in prefixes_to_remove:
-            if insight.startswith(prefix):
-                insight = insight[len(prefix):].strip()
-        # Format section headers for HTML
-        insight = insight.replace("KEY INSIGHT", "<strong>KEY INSIGHT</strong><br>")
-        insight = insight.replace("CATALYSTS", "<br><br><strong>CATALYSTS</strong><br>")
-        insight = insight.replace("RISKS", "<br><br><strong>RISKS</strong><br>")
-        insight = insight.replace("RECOMMENDATION", "<br><br><strong>RECOMMENDATION</strong><br>")
-        insight = insight.replace("**", "")
-        return insight
-    
-    # --- Try GitHub Models (GPT-4o-mini) first ---
+    # --- Try GitHub Models GPT-4o-mini ---
     github_token = os.environ.get("GITHUB_TOKEN", "")
-    if github_token:
-        try:
-            from openai import OpenAI
-            client = OpenAI(
-                base_url="https://models.inference.ai.azure.com",
-                api_key=github_token,
-            )
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are a senior hedge fund analyst. Be concise, skeptical, and data-driven. Maximum 100 words total."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=500,
-            )
-            insight = response.choices[0].message.content.strip()
-            if insight:
-                logger.info(f"Generated AI insight using GitHub Models (GPT-4o-mini) for {alert.ticker}")
-                return _clean_llm_response(insight)
-        except Exception as e:
-            logger.warning(f"GitHub Models API failed: {e}. Trying Ollama fallback.")
-    
-    # --- Try Ollama local ---
+    if not github_token:
+        logger.info(f"No GITHUB_TOKEN set — AI insight not available for {alert.ticker}")
+        return "<em style='color:#999;'>AI insight not available — add GITHUB_TOKEN to .env for GPT-4o analysis.</em>"
+
     try:
-        response = requests.post(
-            "http://localhost:11434/api/generate",
-            json={
-                "model": "llama3:latest",
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.7, "top_p": 0.9, "max_tokens": 500}
-            },
-            timeout=30
+        from openai import OpenAI
+        client = OpenAI(
+            base_url="https://models.inference.ai.azure.com",
+            api_key=github_token,
         )
-        if response.status_code == 200:
-            result = response.json()
-            insight = result.get("response", "").strip()
-            if insight:
-                logger.info(f"Generated AI insight using Ollama (Llama 3) for {alert.ticker}")
-                return _clean_llm_response(insight)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a senior hedge fund analyst. Be concise, skeptical, and data-driven. Max 120 words."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.7,
+            max_tokens=400,
+        )
+        insight = response.choices[0].message.content.strip()
+        if insight:
+            logger.info(f"Generated AI insight via GitHub Models GPT-4o-mini for {alert.ticker}")
+            # Format section headers as bold HTML
+            for header in ["[KEY INSIGHT]", "[CATALYSTS]", "[RISKS]", "[VERDICT]"]:
+                label = header.strip("[]")
+                insight = insight.replace(header, f"<br><strong>{label}</strong> ")
+            insight = insight.replace("**", "").lstrip("<br>")
+            return insight
     except Exception as e:
-        logger.warning(f"Ollama unavailable: {e}. Using rule-based fallback.")
-    
-    # Fallback to rule-based analysis
-    insights = []
-    recommendation = "HOLD"  # Default
-    reasoning = []
-    
-    # Analyze Congressional alignment - check if any politician bought THIS ticker
-    congressional_trades = context.get("congressional_trades", [])
-    # Filter for buys of THIS specific ticker
-    ticker = alert.ticker
-    congressional_buys_this_stock = [
-        t for t in congressional_trades 
-        if t.get("type", "").upper() in ["BUY", "PURCHASE"] 
-        and t.get("ticker", "").upper() == ticker.upper()
-    ]
-    
-    if congressional_buys_this_stock:
-        num_congress = len(congressional_buys_this_stock)
-        politicians = [f"{t['politician']}" for t in congressional_buys_this_stock[:3]]
-        politicians_str = ", ".join(politicians)
-        if num_congress > 3:
-            politicians_str += f", and {num_congress - 3} others"
-        
-        insights.append(f"🏛️ CONGRESSIONAL ALIGNMENT: {num_congress} politician(s) recently bought {ticker} ({politicians_str}). "
-                       f"Congressional buys aligning with corporate insider buying creates an exceptionally strong signal.")
-        recommendation = "STRONG BUY"
-        reasoning.append(f"{num_congress} Congressional buy(s) of {ticker} + insider buying")
-    
-    # Analyze short squeeze potential
-    short_interest = context.get("short_interest")
-    if short_interest and short_interest > 0.15:
-        insights.append(f"🔥 SHORT SQUEEZE SETUP: {short_interest*100:.1f}% of shares are sold short while insiders buy heavily. "
-                       f"Forced short covering could amplify any upside move.")
-        recommendation = "STRONG BUY"
-        reasoning.append("High short interest + insider buying = squeeze potential")
-    
-    # Analyze dip buying
-    dist_from_low = context.get("distance_from_52w_low")
-    if dist_from_low is not None and dist_from_low < 20:
-        insights.append(f"💎 DIP BUYING: Stock trades just {dist_from_low:.1f}% above its 52-week low. "
-                       f"Insiders buying near the bottom is classic smart money behavior.")
-        if recommendation != "STRONG BUY":
-            recommendation = "BUY"
-        reasoning.append("Buying near 52-week low")
-    
-    # Analyze insider conviction by signal type
-    total_value = alert.details.get("total_value") or alert.details.get("value", 0)
-    num_insiders = alert.details.get("num_insiders") or alert.details.get("insider_count", len(alert.trades))
-    
-    if alert.signal_type == "Cluster Buying":
-        insights.append(f"👥 INSIDER CONSENSUS: {num_insiders} insiders buying simultaneously totaling ${total_value:,.0f}. "
-                       f"Coordinated buying rarely happens by coincidence - they likely share material knowledge of upcoming catalysts.")
-        if total_value >= 1_000_000:
-            recommendation = "STRONG BUY"
-        elif recommendation not in ("STRONG BUY",):
-            recommendation = "BUY"
-        reasoning.append("Multiple insiders = strong conviction")
-    elif alert.signal_type == "C-Suite Buy":
-        titles = alert.details.get("titles", [])
-        title_str = ", ".join(titles[:3]) if titles else "C-Suite"
-        insights.append(f"🏢 C-SUITE CONVICTION: {title_str} putting personal capital on the line (${total_value:,.0f}). "
-                       f"Top executives have the most comprehensive view of company fundamentals and pipeline.")
-        if total_value >= 500_000:
-            recommendation = "STRONG BUY"
-        elif recommendation not in ("STRONG BUY",):
-            recommendation = "BUY"
-        reasoning.append("C-suite executive buying")
-    elif alert.signal_type == "Corporation Purchase":
-        investor = alert.details.get("investor", "Corporate entity")
-        insights.append(f"🏢 STRATEGIC INVESTMENT: {investor} taking a position (${total_value:,.0f}). "
-                       f"Corporate investors conduct extensive due diligence - signals strategic partnership or acquisition interest.")
-        recommendation = "STRONG BUY"
-        reasoning.append("Corporate strategic investment")
-    elif alert.signal_type == "Large Single Buy":
-        insights.append(f"💰 LARGE PURCHASE: ${total_value:,.0f} single buy shows exceptional conviction. "
-                       f"Insiders rarely commit this much personal capital without strong confidence in near-term upside.")
-        if recommendation not in ("STRONG BUY",):
-            recommendation = "BUY"
-        reasoning.append("Exceptionally large purchase")
-    elif alert.signal_type == "Trinity Signal":
-        insights.append(f"🔺 TRIPLE CONVERGENCE: Corporate insiders, Congressional traders, and superinvestors all aligned on {ticker}. "
-                       f"This is the highest-conviction signal type - three independent sources with privileged information agree.")
-        recommendation = "STRONG BUY"
-        reasoning.append("Triple source convergence")
-    elif alert.signal_type == "First Buy in 12 Months":
-        insights.append(f"🆕 FIRST BUY IN 12 MONTHS: Insiders breaking a year-long buying drought (${total_value:,.0f}). "
-                       f"This often precedes a major catalyst - earnings surprise, product launch, or strategic announcement.")
-        if recommendation not in ("STRONG BUY",):
-            recommendation = "BUY"
-        reasoning.append("First insider buy in 12 months")
-    elif "Congressional" in alert.signal_type:
-        num_pols = alert.details.get("num_politicians", 1)
-        insights.append(f"🏛️ CONGRESSIONAL TRADE: {num_pols} politician(s) buying {ticker}. "
-                       f"These proven traders have access to legislative and regulatory insights not available to the public.")
-        if recommendation not in ("STRONG BUY",):
-            recommendation = "BUY"
-        reasoning.append("Congressional insider buying")
-    
-    # Analyze valuation
-    pe_ratio = context.get("pe_ratio")
-    if pe_ratio and 5 < pe_ratio < 15:
-        insights.append(f"📊 ATTRACTIVE VALUATION: P/E of {pe_ratio:.1f} suggests undervaluation. Insiders buying cheap stock doubles the signal.")
-        reasoning.append("Attractive valuation")
-    elif pe_ratio and pe_ratio > 40:
-        insights.append(f"⚠️ RICH VALUATION: P/E of {pe_ratio:.1f} is elevated. Insiders may see catalysts not yet priced in, but entry at premium valuations carries risk.")
-        reasoning.append("High valuation - caution")
-    
-    # Price momentum
-    price_change_5d = context.get("price_change_5d")
-    price_change_1m = context.get("price_change_1m")
-    if price_change_5d is not None and price_change_1m is not None:
-        if price_change_5d < -5 and price_change_1m < -10:
-            insights.append(f"⚠️ CATCHING A FALLING KNIFE: Stock down {abs(price_change_1m):.1f}% over 1 month. "
-                           f"Insiders may be right long-term, but consider dollar-cost averaging rather than a full position.")
-            if recommendation == "BUY":
-                recommendation = "BUY WITH CAUTION"
-            reasoning.append("Negative momentum")
-        elif price_change_5d > 3 and price_change_1m > 10:
-            insights.append(f"📈 STRONG MOMENTUM: Stock up {price_change_1m:.1f}% over 1 month. Insiders buying into strength confirms the trend.")
-            reasoning.append("Positive momentum confirms signal")
-    
-    # Default insight if none triggered (shouldn't happen now but safety net)
-    if not insights:
-        insights.append(f"📈 INSIDER ACCUMULATION: {alert.signal_type} detected for {alert.ticker}. "
-                       f"Insiders putting personal capital at risk (${total_value:,.0f}) historically signals undervaluation.")
-        recommendation = "BUY"
-    
-    # Build final insight
-    insight_text = " ".join(insights)
-    
-    # Add recommendation
-    if recommendation == "STRONG BUY":
-        action = "🚀 RECOMMENDATION: STRONG BUY - Multiple bullish factors align. Consider taking a position."
-    elif recommendation == "BUY":
-        action = "✅ RECOMMENDATION: BUY - Positive setup with good risk/reward. Entry recommended."
-    elif recommendation == "BUY WITH CAUTION":
-        action = "✅ RECOMMENDATION: BUY WITH CAUTION - Signal is strong but momentum is negative. Consider scaling in gradually."
-    elif recommendation == "HOLD/ACCUMULATE":
-        action = "📊 RECOMMENDATION: HOLD/ACCUMULATE - Solid opportunity. Build position gradually."
-    elif recommendation == "MONITOR":
-        action = "👀 RECOMMENDATION: MONITOR - Watch for additional confirmation before entering."
-    else:
-        action = "📌 RECOMMENDATION: HOLD - Neutral signal. Existing holders maintain position."
-    
-    insight_text += f"\n\n{action}"
-    
-    if reasoning:
-        insight_text += f"\n\nKey factors: {', '.join(reasoning)}"
-    
-    return insight_text
+        logger.warning(f"GitHub Models API failed for {alert.ticker}: {e}")
+
+    # No LLM available
+    return "<em style='color:#999;'>AI insight not available — GitHub Models API call failed. Check GITHUB_TOKEN.</em>"
+
 
 
 def calculate_confidence_score(alert: InsiderAlert, context: Dict) -> tuple[int, str]:
@@ -4076,7 +3894,7 @@ def format_email_html(alert: InsiderAlert) -> str:
             link_url = f"https://www.capitoltrades.com/trades"
         link_text = "View on Capitol Trades →"
     else:
-        link_url = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+        link_url = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
         link_text = "View on OpenInsider →"
     
     html += f"""
@@ -4389,7 +4207,7 @@ def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, con
         link_url = f"https://www.capitoltrades.com/issuers?search={alert.ticker}"
         links.append(f"[Capitol Trades]({escape_md(link_url)})")
     
-    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
     links.append(f"[OpenInsider]({escape_md(oi_link)})")
     
     if links:
@@ -4506,7 +4324,7 @@ Alert Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         logger.warning(f"Could not add context to text email: {e}")
     
     text += "\n" + "=" * 70 + "\n"
-    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
     text += f"View on OpenInsider: {oi_link}\n"
     text += f"\nAlert ID: {alert.alert_id[:16]}...\n"
     text += "\nALPHA WHISPERER - Insider Trading Intelligence\n"
@@ -4921,7 +4739,7 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             capitol_link_esc = escape_md(capitol_link)
             links.append(f"[View on Capitol Trades]({capitol_link_esc})")
         if has_openinsider:
-            oi_link = f"http://openinsider.com/screener?s={ticker}&o=&pl=&ph=&ll=&lh=&fd=30&fdr=&td=0&tdr=&fdlyl=&fdlyh=&daysago=&xp=1&vl=&vh=&ocl=&och=&sic1=-1&sicl=100&sich=9999&grp=0&nfl=&nfh=&nil=&nih=&nol=&noh=&v2l=&v2h=&oc2l=&oc2h=&sortcol=0&cnt=100&page=1"
+            oi_link = f"http://openinsider.com/screener?s={ticker}&xp=1&daysago=30&cnt=40&page=1"
             oi_link_esc = escape_md(oi_link)
             links.append(f"[View on OpenInsider]({oi_link_esc})")
         

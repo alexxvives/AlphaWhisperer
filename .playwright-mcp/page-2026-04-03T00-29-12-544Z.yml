@@ -1,0 +1,69 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - navigation [ref=e5]:
+        - generic [ref=e6]:
+          - link "Go to site's root page." [ref=e8] [cursor=pointer]:
+            - /url: /
+            - img [ref=e9]
+          - generic [ref=e14]: Capitol Trades
+        - generic [ref=e15]:
+          - link "Trades" [ref=e16] [cursor=pointer]:
+            - /url: /trades
+          - link "Politicians" [ref=e17] [cursor=pointer]:
+            - /url: /politicians
+          - link "Issuers" [ref=e18] [cursor=pointer]:
+            - /url: /issuers
+          - link "Insights" [ref=e19] [cursor=pointer]:
+            - /url: /articles
+          - link "Buzz" [ref=e20] [cursor=pointer]:
+            - /url: /buzz
+          - link "Press" [ref=e21] [cursor=pointer]:
+            - /url: /press
+          - link "More More" [ref=e22] [cursor=pointer]:
+            - /url: "#"
+            - generic [ref=e23]:
+              - text: More
+              - img [ref=e24]
+            - generic [ref=e26]: More
+    - main [ref=e27]:
+      - generic [ref=e28]:
+        - heading "Something went wrong!" [level=2] [ref=e29]
+        - button "Try again" [ref=e30] [cursor=pointer]
+    - contentinfo [ref=e31]:
+      - generic [ref=e32]:
+        - generic [ref=e33]:
+          - link "Go to site's root page." [ref=e35] [cursor=pointer]:
+            - /url: /
+            - img [ref=e36]
+          - link "Go to 2iQ Research home page" [ref=e42] [cursor=pointer]:
+            - /url: https://www.2iqresearch.com/
+        - paragraph [ref=e44]: "*The historical data available on our website is restricted to the past 3 years."
+        - navigation [ref=e46]:
+          - link "Follow" [ref=e47] [cursor=pointer]:
+            - /url: https://twitter.com/capitol2iq
+            - img [ref=e48]
+            - generic [ref=e50]: Follow
+          - link "About Us" [ref=e51] [cursor=pointer]:
+            - /url: /about-us
+          - link "Download PressKit" [ref=e52] [cursor=pointer]:
+            - /url: https://static.2iq.eu/press/capitoltrades-presskit.zip
+          - link "Sitemap" [ref=e53] [cursor=pointer]:
+            - /url: /sitemap
+          - link "Privacy Policy" [ref=e54] [cursor=pointer]:
+            - /url: /privacy-policy
+          - link "Terms & Conditions" [ref=e55] [cursor=pointer]:
+            - /url: /terms-and-conditions
+          - link "Imprint" [ref=e56] [cursor=pointer]:
+            - /url: /imprint
+          - link "Disclaimer" [ref=e57] [cursor=pointer]:
+            - /url: /disclaimer
+        - paragraph [ref=e58]: © 2026 2iQ Research
+    - generic [ref=e60]:
+      - generic [ref=e61]:
+        - heading "This website uses cookies" [level=2] [ref=e62]
+        - paragraph [ref=e63]: We use cookies to customize content, provide social media features, and analyze traffic. Your site usage information may be shared with our partners for social media, advertising, and analytics purposes.
+      - generic [ref=e64]:
+        - button "Accept All" [ref=e65] [cursor=pointer]
+        - button "Only Analytics" [ref=e66] [cursor=pointer]
+  - alert [ref=e67]

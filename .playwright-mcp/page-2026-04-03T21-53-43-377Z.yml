@@ -1,0 +1,329 @@
+- generic [ref=e2]:
+  - list [ref=e4]:
+    - listitem [ref=e5]:
+      - link "OpenInsider" [ref=e6] [cursor=pointer]:
+        - /url: /
+    - listitem [ref=e7]:
+      - link "Latest" [ref=e8] [cursor=pointer]:
+        - /url: "#"
+    - listitem [ref=e9]:
+      - link "Top" [ref=e10] [cursor=pointer]:
+        - /url: "#"
+    - listitem [ref=e11]:
+      - link "Charts" [ref=e12] [cursor=pointer]:
+        - /url: /charts
+    - listitem [ref=e13]:
+      - generic [ref=e15]:
+        - searchbox "Tickers" [ref=e16]
+        - button "Go" [ref=e17]
+  - heading "NVDA - Nvidia Corp - SEC Form 4 Insider Trading Screener" [level=1] [ref=e19]
+  - generic [ref=e20]:
+    - text: Manufactured Goods - Electronics -
+    - link "Semiconductors & Related Devices" [ref=e21] [cursor=pointer]:
+      - /url: /industry/Semiconductors---Related-Devices/3674
+    - text: "- NVDA ("
+    - link "1045810" [ref=e22] [cursor=pointer]:
+      - /url: https://sec.gov/cgi-bin/browse-edgar?action=getcompany&owner=exclude&count=100&CIK=1045810
+    - text: )
+  - table [ref=e25]:
+    - rowgroup [ref=e26]:
+      - row "General Date Transaction Filing Industry Insider Title Group by Filing Sort by Filing Date Max Results 100 Page 1 Search clear" [ref=e27]:
+        - cell "General Date" [ref=e28]:
+          - group "General" [ref=e29]:
+            - strong [ref=e31]: General
+            - table [ref=e32]:
+              - rowgroup [ref=e33]:
+                - row "Tickers NVDA" [ref=e34]:
+                  - cell "Tickers" [ref=e35]
+                  - cell "NVDA" [ref=e36]:
+                    - textbox "Symbols or CIKs" [ref=e37]: NVDA
+                - row "Insider" [ref=e38]:
+                  - cell "Insider" [ref=e39]
+                  - cell [ref=e40]:
+                    - textbox "Insider Name or CIK" [ref=e41]
+                - row "Sh Price $" [ref=e42]:
+                  - cell "Sh Price $" [ref=e43]
+                  - cell [ref=e44]:
+                    - spinbutton [ref=e45]
+                    - spinbutton [ref=e46]
+                - row "Lqdty M$" [ref=e47]:
+                  - cell "Lqdty M$" [ref=e48]
+                  - cell [ref=e49]:
+                    - spinbutton [ref=e50]
+                    - spinbutton [ref=e51]
+          - group "Date" [ref=e52]:
+            - strong [ref=e54]: Date
+            - table [ref=e55]:
+              - rowgroup [ref=e56]:
+                - row "Filing Date Last 1 month" [ref=e57]:
+                  - cell "Filing Date" [ref=e58]
+                  - cell "Last 1 month" [ref=e59]:
+                    - combobox [ref=e60]:
+                      - option "All dates"
+                      - option "Custom"
+                      - option "Latest day"
+                      - option "Last 3 days"
+                      - option "Last 1 week"
+                      - option "Last 2 weeks"
+                      - option "Last 1 month" [selected]
+                      - option "Last 2 months"
+                      - option "Last 3 months"
+                      - option "Last 6 months"
+                      - option "Last 1 year"
+                      - option "Last 2 years"
+                      - option "Last 4 years"
+                - row [ref=e61]:
+                  - cell [ref=e62]:
+                    - textbox "Filing Date Range" [ref=e63]
+                - row "Trade Date All dates" [ref=e64]:
+                  - cell "Trade Date" [ref=e65]
+                  - cell "All dates" [ref=e66]:
+                    - combobox [ref=e67]:
+                      - option "All dates" [selected]
+                      - option "Custom"
+                      - option "Latest day"
+                      - option "Last 3 days"
+                      - option "Last 1 week"
+                      - option "Last 2 weeks"
+                      - option "Last 1 month"
+                      - option "Last 2 months"
+                      - option "Last 3 months"
+                      - option "Last 6 months"
+                      - option "Last 1 year"
+                      - option "Last 2 years"
+                      - option "Last 4 years"
+                - row [ref=e68]:
+                  - cell [ref=e69]:
+                    - textbox "Trade Date Range" [ref=e70]
+                - row "Filing Delay" [ref=e71]:
+                  - cell "Filing Delay" [ref=e72]
+                  - cell [ref=e73]:
+                    - spinbutton [ref=e74]
+                    - spinbutton [ref=e75]
+                - row "N Days Ago" [ref=e76]:
+                  - cell "N Days Ago" [ref=e77]
+                  - cell [ref=e78]:
+                    - spinbutton [ref=e79]
+        - cell "Transaction Filing Industry" [ref=e80]:
+          - table [ref=e81]:
+            - rowgroup [ref=e82]:
+              - row "Transaction Filing" [ref=e83]:
+                - cell "Transaction Filing" [ref=e84]:
+                  - group "Transaction Filing" [ref=e85]:
+                    - strong [ref=e87]: Transaction Filing
+                    - table [ref=e88]:
+                      - rowgroup [ref=e89]:
+                        - row "P - Purchase S - Sale A - Grant D - Sale to Iss G - Gift F - Tax M - Option Ex X - Option Ex C - Cnv Deriv W - Inherited" [ref=e90]:
+                          - cell "P - Purchase S - Sale A - Grant D - Sale to Iss G - Gift" [ref=e91]:
+                            - checkbox [checked] [ref=e92]
+                            - text: P - Purchase
+                            - checkbox [ref=e93]
+                            - text: S - Sale
+                            - checkbox [ref=e94]
+                            - text: A - Grant
+                            - checkbox [ref=e95]
+                            - text: D - Sale to Iss
+                            - checkbox [ref=e96]
+                            - text: G - Gift
+                          - cell "F - Tax M - Option Ex X - Option Ex C - Cnv Deriv W - Inherited" [ref=e97]:
+                            - checkbox [ref=e98]
+                            - text: F - Tax
+                            - checkbox [ref=e99]
+                            - text: M - Option Ex
+                            - checkbox [ref=e100]
+                            - text: X - Option Ex
+                            - checkbox [ref=e101]
+                            - text: C - Cnv Deriv
+                            - checkbox [ref=e102]
+                            - text: W - Inherited
+                        - row "No deriv Multiple Days" [ref=e103]:
+                          - cell "No deriv" [ref=e104]:
+                            - checkbox [ref=e105]
+                            - text: No deriv
+                          - cell "Multiple Days" [ref=e106]:
+                            - checkbox [ref=e107]
+                            - text: Multiple Days
+                        - row "Traded K$" [ref=e108]:
+                          - cell "Traded K$" [ref=e109]
+                          - cell [ref=e110]:
+                            - spinbutton [ref=e111]
+                            - spinbutton [ref=e112]
+                        - row "Own Chg %" [ref=e113]:
+                          - cell "Own Chg %" [ref=e114]
+                          - cell [ref=e115]:
+                            - spinbutton [ref=e116]
+                            - spinbutton [ref=e117]
+              - row "Industry" [ref=e118]:
+                - cell "Industry" [ref=e119]:
+                  - group "Industry" [ref=e120]:
+                    - strong [ref=e122]: Industry
+                    - table [ref=e123]:
+                      - rowgroup [ref=e124]:
+                        - row "All Sectors (except Funds)" [ref=e125]:
+                          - cell "All Sectors (except Funds)" [ref=e126]:
+                            - combobox [ref=e127]:
+                              - option "All Sectors (except Funds)" [selected]
+                              - option "Agriculture, Forestry, Fish"
+                              - option "Mining"
+                              - option "Construction"
+                              - option "Manufacturing"
+                              - option "Transportation & Utilities"
+                              - option "Wholesale Trade"
+                              - option "Retail Trade"
+                              - option "Financial"
+                              - option "Services"
+                              - option "Closed-End Funds"
+                        - row "All Subsectors" [ref=e128]:
+                          - cell "All Subsectors" [ref=e129]:
+                            - combobox [disabled] [ref=e130]:
+                              - option "All Subsectors"
+                        - row "All Industries" [ref=e131]:
+                          - cell "All Industries" [ref=e132]:
+                            - combobox [disabled] [ref=e133]:
+                              - option "All Industries"
+                        - row:
+                          - cell
+        - cell "Insider Title" [ref=e134]:
+          - table [ref=e135]:
+            - rowgroup [ref=e136]:
+              - row "Insider Title" [ref=e137]:
+                - cell "Insider Title" [ref=e138]:
+                  - group "Insider Title" [ref=e139]:
+                    - strong [ref=e141]: Insider Title
+                    - checkbox [ref=e142]
+                    - text: Officer
+                    - checkbox [ref=e143]
+                    - text: COB
+                    - checkbox [ref=e144]
+                    - text: CEO
+                    - checkbox [ref=e145]
+                    - text: Pres
+                    - checkbox [ref=e146]
+                    - text: COO
+                    - checkbox [ref=e147]
+                    - text: CFO
+                    - checkbox [ref=e148]
+                    - text: GC
+                    - checkbox [ref=e149]
+                    - text: VP
+                    - checkbox [ref=e150]
+                    - text: Director
+                    - checkbox [ref=e151]
+                    - text: 10%own
+                    - checkbox [ref=e152]
+                    - text: Other
+        - cell "Group by Filing Sort by Filing Date Max Results 100 Page 1 Search clear" [ref=e153]:
+          - table [ref=e154]:
+            - rowgroup [ref=e155]:
+              - row "Group by Filing" [ref=e156]:
+                - cell "Group by" [ref=e157]
+                - cell "Filing" [ref=e158]:
+                  - combobox [ref=e159]:
+                    - option "Filing" [selected]
+                    - option "Company"
+          - table [ref=e160]:
+            - rowgroup [ref=e161]:
+              - row "Sort by Filing Date" [ref=e162]:
+                - cell "Sort by" [ref=e163]
+                - cell "Filing Date" [ref=e164]:
+                  - combobox [ref=e165]:
+                    - option "Filing Date" [selected]
+                    - option "Trade Date"
+                    - option "Ticker Symbol"
+                    - option "Trade Value"
+              - row "Max Results 100" [ref=e166]:
+                - cell "Max Results" [ref=e167]
+                - cell "100" [ref=e168]:
+                  - spinbutton [ref=e169]: "100"
+              - row "Page 1" [ref=e170]:
+                - cell "Page" [ref=e171]
+                - cell "1" [ref=e172]:
+                  - spinbutton [ref=e173]: "1"
+              - row "Search clear" [ref=e174]:
+                - cell [ref=e175]
+                - cell "Search clear" [ref=e176]:
+                  - button "Search" [ref=e177]
+                  - link "clear" [ref=e178] [cursor=pointer]:
+                    - /url: /screener
+        - cell
+  - insertion [ref=e180]:
+    - iframe [ref=e182]:
+      - generic [ref=f3e3]:
+        - link "0" [ref=f3e4] [cursor=pointer]:
+          - /url: "#"
+        - link "1" [ref=f3e5] [cursor=pointer]:
+          - /url: "#"
+        - generic [ref=f3e6]:
+          - img [ref=f3e9]
+          - generic [ref=f3e16] [cursor=pointer]:
+            - paragraph [ref=f3e18]: About this Ad
+            - button "Report" [ref=f3e20]
+            - button "Opt Out Do not sell my personal information" [ref=f3e22]
+            - button "Why this Ad? ⓘ" [ref=f3e24]
+          - generic [ref=f3e31] [cursor=pointer]:
+            - generic [ref=f3e44]:
+              - paragraph [ref=f3e46]: Download
+              - paragraph [ref=f3e48]: to use extension (Free)
+            - generic [ref=f3e51]:
+              - paragraph [ref=f3e53]: Only 2 Steps
+              - paragraph [ref=f3e55]: Click "Download"
+              - paragraph [ref=f3e57]: Add Search Safely in Chrome
+            - img [ref=f3e65]
+          - generic [ref=f3e71] [cursor=pointer]:
+            - button "Seen this ad multiple times" [ref=f3e74]
+            - button "Not interested in this ad" [ref=f3e77]
+            - button "Ad covered content" [ref=f3e80]
+            - button "Already bought this" [ref=f3e83]
+          - generic [ref=f3e87] [cursor=pointer]:
+            - paragraph [ref=f3e89]: About this Ad
+            - paragraph [ref=f3e91]: Thank you for reporting the ad. We will review it promptly
+          - generic [ref=f3e95] [cursor=pointer]:
+            - paragraph [ref=f3e97]: About this Ad
+            - paragraph [ref=f3e99]: You have successfully opted out of our communications. We have removed your personal data from our systems and will no longer store or use it.
+        - link "2" [ref=f3e100] [cursor=pointer]:
+          - /url: "#"
+        - link "3" [ref=f3e101] [cursor=pointer]:
+          - /url: "#"
+  - generic [ref=e183]:
+    - generic [ref=e184]:
+      - table [ref=e185]:
+        - rowgroup [ref=e186]:
+          - row "A Amended filing" [ref=e187]:
+            - cell "A" [ref=e188]
+            - cell "Amended filing" [ref=e189]
+          - row "D Derivative transaction in filing (usually option exercise)" [ref=e190]:
+            - cell "D" [ref=e191]
+            - cell "Derivative transaction in filing (usually option exercise)" [ref=e192]
+          - row "E Error detected in filing" [ref=e193]:
+            - cell "E" [ref=e194]
+            - cell "Error detected in filing" [ref=e195]
+          - row "M Multiple transactions in filing; earliest reported transaction date and weighted average transaction price" [ref=e196]:
+            - cell "M" [ref=e197]
+            - cell "Multiple transactions in filing; earliest reported transaction date and weighted average transaction price" [ref=e198]
+      - table [ref=e199]:
+        - rowgroup [ref=e200]:
+          - row "S - Sale Sale of securities on an exchange or to another person" [ref=e201]:
+            - cell "S - Sale" [ref=e202]
+            - cell "Sale of securities on an exchange or to another person" [ref=e203]
+          - row "S - Sale+OE Sale of securities on an exchange or to another person (after option exercise)" [ref=e204]:
+            - cell "S - Sale+OE" [ref=e205]
+            - cell "Sale of securities on an exchange or to another person (after option exercise)" [ref=e206]
+          - row "F - Tax Payment of exercise price or tax liability using portion of securities received from the company" [ref=e207]:
+            - cell "F - Tax" [ref=e208]
+            - cell "Payment of exercise price or tax liability using portion of securities received from the company" [ref=e209]
+          - row "P - Purchase Purchase of securities on an exchange or from another person" [ref=e210]:
+            - cell "P - Purchase" [ref=e211]
+            - cell "Purchase of securities on an exchange or from another person" [ref=e212]
+    - link "Return to top" [ref=e213] [cursor=pointer]:
+      - /url: "#"
+    - generic [ref=e214]:
+      - text: Data provided by sec.gov 6:00-22:00 ET Mon-Fri except federal holidays.
+      - text: Copyright © 2011-2021 openinsider.com. All rights reserved.
+      - link "Terms" [ref=e215] [cursor=pointer]:
+        - /url: /terms.txt
+      - text: "-"
+      - link "Privacy" [ref=e216] [cursor=pointer]:
+        - /url: /privacy.txt
+      - text: "-"
+      - link "Contact" [ref=e217] [cursor=pointer]:
+        - /url: /contact
