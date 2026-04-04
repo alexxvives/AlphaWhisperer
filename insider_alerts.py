@@ -96,12 +96,23 @@ USE_CAPITOL_TRADES = os.getenv("USE_CAPITOL_TRADES", "true").lower() == "true"
 MIN_CONGRESSIONAL_CLUSTER = int(os.getenv("MIN_CONGRESSIONAL_CLUSTER", "2"))
 CONGRESSIONAL_LOOKBACK_DAYS = int(os.getenv("CONGRESSIONAL_LOOKBACK_DAYS", "30"))
 
-# Elite Congressional Traders - Top 15 proven performers (party irrelevant for filtering)
+# Elite Congressional Traders - 13 backtest-validated performers (Apr 2026)
+# Criteria: avg 30d return > +3%, win rate > 55%, 10+ trades (published-date entry)
+# Source: backtest_congressional.py full-universe backtest (4,857 deduped signals)
 ELITE_CONGRESSIONAL_TRADERS = [
-    "Nancy Pelosi", "Josh Gottheimer", "Ro Khanna", "Michael McCaul", 
-    "Tommy Tuberville", "Markwayne Mullin", "Dan Crenshaw", "Brian Higgins",
-    "Richard Blumenthal", "Debbie Wasserman Schultz", "Tom Kean Jr", 
-    "Gil Cisneros", "Cleo Fields", "Marjorie Taylor Greene", "Lisa McClain"
+    "Bruce Westerman",         # 56 trades, 87.5% WR, +10.0% avg30d
+    "Greg Stanton",            # 59 trades, 86.4% WR, +7.2% avg30d
+    "Cleo Fields",             # 36 trades, 58.3% WR, +7.9% avg30d
+    "James Comer",             # 12 trades, 75.0% WR, +6.3% avg30d
+    "Tommy Tuberville",        # 73 trades, 67.1% WR, +5.6% avg30d
+    "Byron Donalds",           # 36 trades, 63.9% WR, +5.5% avg30d
+    "John James",              # 63 trades, 63.5% WR, +4.8% avg30d
+    "David Taylor",            # 18 trades, 66.7% WR, +4.7% avg30d
+    "April McClain Delaney",   # 24 trades, 79.2% WR, +4.0% avg30d
+    "Neal Dunn",               # 15 trades, 73.3% WR, +4.0% avg30d
+    "Markwayne Mullin",        # 106 trades, 65.1% WR, +3.8% avg30d
+    "Rich McCormick",          # 11 trades, 63.6% WR, +3.6% avg30d
+    "Marjorie Taylor Greene",  # 173 trades, 58.4% WR, +3.2% avg30d
 ]
 
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "30"))

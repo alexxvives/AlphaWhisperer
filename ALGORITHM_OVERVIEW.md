@@ -18,6 +18,20 @@
 
 Best signal type: **Cluster Buying** (73% WR at 90d, +15.3% avg). C-Suite Buy fades long-term (44% WR at 90d).
 
+### v2.1 Congressional Backtest (4,857 signals, 69 politicians with 3+ trades)
+Full-universe backtest of ALL politicians (not just elite). Published-date entry (realistic).
+
+**Aggregate (all politicians combined):**
+| Horizon | Win Rate | Avg Return | Median |
+|---------|----------|------------|--------|
+| 7-Day   | 54.3%    | +0.3%      | +0.3%  |
+| 30-Day  | 58.5%    | +1.4%      | +1.4%  |
+| 90-Day  | 61.0%    | +3.6%      | +3.6%  |
+
+**Edge is in filtering**: Top 13 validated politicians (★) average +3-10% at 30d vs +1.4% universe.
+Bruce Westerman (87.5% WR, +10% avg) and Greg Stanton (86.4% WR, +7.2% avg) are standouts.
+Congressional returns peak at 90d for 40% of signals — these are longer holds than corporate insider signals.
+
 ### Previous Changes (v1.1)
 - **AI Insights (GPT-4o-mini)**: `generate_ai_insight()` now tries GitHub Models API (free via `GITHUB_TOKEN`) before falling back to Ollama, then rule-based analysis. Requires `openai` package and `GITHUB_TOKEN` env var.
 - **Insider Alpha Calibration**: New `calculate_insider_alpha_score()` function queries the insider's historical trades from DB (buy count, unique tickers, avg value, buy-to-sell ratio, repeat conviction). Applied as Factor 8 (0.8x-1.5x multiplier) in `calculate_composite_signal_score()`.
@@ -107,11 +121,10 @@ CREATE TABLE congressional_trades (
 ```
 
 **Elite Filter** (Applied later during detection):
-Only these 15 proven traders trigger signals:
-- Nancy Pelosi, Josh Gottheimer, Ro Khanna, Michael McCaul, Tommy Tuberville
-- Markwayne Mullin, Dan Crenshaw, Brian Higgins, Richard Blumenthal
-- Debbie Wasserman Schultz, Tom Kean Jr, Gil Cisneros, Cleo Fields
-- Marjorie Taylor Greene, Lisa McClain
+Only these 13 backtest-validated traders trigger signals (avg 30d return > +3%, WR > 55%, 10+ trades):
+- Bruce Westerman, Greg Stanton, Cleo Fields, James Comer, Tommy Tuberville
+- Byron Donalds, John James, David Taylor, April McClain Delaney, Neal Dunn
+- Markwayne Mullin, Rich McCormick, Marjorie Taylor Greene
 
 **Output**: ~50-100 Congressional trades stored in database, ready for Elite filtering.
 
@@ -738,11 +751,25 @@ The system implements **8 distinct signal types** across three categories (Beari
 
 The system tracks **only proven high-performance politicians** to eliminate noise. Party affiliation is irrelevant for individual trades - a smart trade is a smart trade. Party only matters for "Bipartisan Cluster" signals (extra conviction when both D and R buy same stock).
 
-**Elite Watchlist (Top 15 Traders):**
-- Nancy Pelosi, Josh Gottheimer, Ro Khanna, Michael McCaul, Tommy Tuberville
-- Markwayne Mullin, Dan Crenshaw, Brian Higgins, Richard Blumenthal
-- Debbie Wasserman Schultz, Tom Kean Jr, Gil Cisneros, Cleo Fields
-- Marjorie Taylor Greene, Lisa McClain
+**Elite Watchlist (13 Backtest-Validated Traders, Apr 2026):**
+Criteria: avg 30d return > +3%, win rate > 55%, 10+ trades from published date.
+Source: Full-universe backtest of ALL 111 politicians (4,857 deduped signals).
+
+| Politician | Trades | 30d WR | 30d Avg |
+|---|---|---|---|
+| Bruce Westerman | 56 | 87.5% | +10.0% |
+| Greg Stanton | 59 | 86.4% | +7.2% |
+| Cleo Fields | 36 | 58.3% | +7.9% |
+| James Comer | 12 | 75.0% | +6.3% |
+| Tommy Tuberville | 73 | 67.1% | +5.6% |
+| Byron Donalds | 36 | 63.9% | +5.5% |
+| John James | 63 | 63.5% | +4.8% |
+| David Taylor | 18 | 66.7% | +4.7% |
+| April McClain Delaney | 24 | 79.2% | +4.0% |
+| Neal Dunn | 15 | 73.3% | +4.0% |
+| Markwayne Mullin | 106 | 65.1% | +3.8% |
+| Rich McCormick | 11 | 63.6% | +3.6% |
+| Marjorie Taylor Greene | 173 | 58.4% | +3.2% |
 
 **E. Elite Congressional Buy** ⭐⭐⭐⭐⭐
 - **Logic**: Elite trader purchases $100K+ of a stock
