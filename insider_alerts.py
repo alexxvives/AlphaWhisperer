@@ -1320,7 +1320,7 @@ def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> 
     def _fetch_web_context(ticker: str, company: str) -> str:
         """Search DuckDuckGo for recent news/analysis about the company."""
         try:
-            from duckduckgo_search import DDGS
+            from ddgs import DDGS
             query = f"{ticker} {company} stock news analysis 2025 2026"
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=5, timelimit="m"))  # last month
@@ -1400,7 +1400,20 @@ MARKET DATA:"""
     if web_ctx:
         prompt += web_ctx
 
-    prompt += """
+    # Determine if this is an elite congressional signal
+    has_elite_congress = any(
+        name in str(alert.company_name) + str(alert.details) + str([t.get("politician","") for t in context.get("congressional_trades",[])])
+        for name in ["Westerman","Stanton","Fields","Comer","Tuberville","Donalds","James","Taylor","Delaney","Dunn","Mullin","McCormick","Greene"]
+    ) or "Congressional" in alert.signal_type
+
+    verdict_options = "STRONG BUY / BUY" if has_elite_congress else "STRONG BUY / BUY / HOLD"
+
+    prompt += f"""
+
+INVESTMENT STRATEGY:
+- Target: +10% gain from entry, then exit
+- Typical hold: 2–8 weeks for insider signals, 4–12 weeks for congressional signals
+- This is a COPY TRADE system — we mirror proven insiders and high-alpha politicians
 
 TASK: Provide sharp, data-driven analysis in under 120 words total.
 
@@ -1408,13 +1421,12 @@ Structure your response as:
 [KEY INSIGHT] What's the non-obvious edge? Reference the actual numbers.
 [CATALYSTS] What could drive this? Be sector-specific.
 [RISKS] What could go wrong? Be honest.
-[VERDICT] STRONG BUY / BUY / HOLD / WAIT — one sentence explaining why, citing specific metrics.
+[VERDICT] {verdict_options} — cite the specific reason and estimated hold period (e.g. "BUY, target +10% in 4-6 weeks").
 
 Rules:
-- High P/E (>30) = start cautious
-- Negative 1M price = acknowledge it
-- Congressional alignment = highlight it
-- Web search results = use them to add current context the numbers can't show
+- Congressional alignment from a proven trader = always BUY or STRONG BUY, never anything weaker
+- High P/E (>30) = note it but don't downgrade a congressional signal over valuation
+- Use web search results to add current context
 - Never invent data not provided above
 - Complete all sentences within the 120-word limit"""
 
@@ -3885,13 +3897,8 @@ def format_email_html(alert: InsiderAlert) -> str:
                 if pid and pid != "nan" and pid not in politician_ids:
                     politician_ids.append(pid)
         
-        if politician_ids:
-            # Build link with all politician IDs (Capitol Trades doesn't filter by ticker param)
-            pol_params = '&'.join([f"politician={pid}" for pid in politician_ids])
-            link_url = f"https://www.capitoltrades.com/trades?{pol_params}"
-        else:
-            # Fallback - just show all trades
-            link_url = f"https://www.capitoltrades.com/trades"
+        # Filter by ticker — shows all congressional trades for this specific stock
+        link_url = f"https://www.capitoltrades.com/trades?pageSize=40&asset={alert.ticker}"
         link_text = "View on Capitol Trades →"
     else:
         link_url = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
@@ -4204,7 +4211,7 @@ def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, con
     
     if is_congressional:
         # Capitol Trades: search by ticker on issuers page (verified working)
-        link_url = f"https://www.capitoltrades.com/issuers?search={alert.ticker}"
+        link_url = f"https://www.capitoltrades.com/trades?pageSize=40&asset={alert.ticker}"
         links.append(f"[Capitol Trades]({escape_md(link_url)})")
     
     oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
@@ -4731,11 +4738,7 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
             # Build Capitol Trades link with all politician IDs (no ticker param - doesn't work)
             congressional_trades = [t for t in sorted_trades if t.get('source') == 'Congressional']
             politician_ids = list(set(t.get('politician_id') for t in congressional_trades if t.get('politician_id')))
-            if politician_ids:
-                pol_params = '&'.join([f"politician={pid}" for pid in politician_ids])
-                capitol_link = f"https://www.capitoltrades.com/trades?{pol_params}"
-            else:
-                capitol_link = f"https://www.capitoltrades.com/trades"
+            capitol_link = f"https://www.capitoltrades.com/trades?pageSize=40&asset={ticker}"
             capitol_link_esc = escape_md(capitol_link)
             links.append(f"[View on Capitol Trades]({capitol_link_esc})")
         if has_openinsider:
