@@ -130,9 +130,6 @@ MIN_CLUSTER_INSIDERS = int(os.getenv("MIN_CLUSTER_INSIDERS", "5"))  # Require 5+
 MIN_CORP_PURCHASE = float(os.getenv("MIN_CORP_PURCHASE", "250000"))  # Minimum for corporation purchases
 MIN_CONGRESSIONAL_CLUSTER_VALUE = float(os.getenv("MIN_CONGRESSIONAL_CLUSTER_VALUE", "50000"))  # Minimum total for Congressional cluster
 MAX_FILING_DELAY_DAYS = int(os.getenv("MAX_FILING_DELAY_DAYS", "45"))  # Filter trades filed too late
-MIN_FIRST_BUY_12M = float(os.getenv("MIN_FIRST_BUY_12M", "50000"))
-MIN_SECTOR_CLUSTER_VALUE = float(os.getenv("MIN_SECTOR_CLUSTER_VALUE", "1000000"))
-MIN_BEARISH_CLUSTER_VALUE = float(os.getenv("MIN_BEARISH_CLUSTER_VALUE", "1000000"))
 
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
@@ -2086,117 +2083,6 @@ def detect_large_single_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     return alerts
 
 
-def detect_first_buy_12m(df: pd.DataFrame) -> List[InsiderAlert]:
-    """
-    Detect first buy in 12 months: Insider's first purchase in 365 days, ≥ MIN_FIRST_BUY_12M.
-    
-    Note: This requires historical data. We'll check if this is the only buy for this
-    insider+ticker combination in our dataset.
-    
-    Args:
-        df: Trades DataFrame
-        
-    Returns:
-        List of InsiderAlert objects
-    """
-    alerts = []
-    
-    buys = df[
-        (df["Trade Type"] == "Buy") &
-        (df["Value"] >= MIN_FIRST_BUY_12M)
-    ].copy()
-    
-    # Group by ticker and insider
-    for (ticker, insider), group in buys.groupby(["Ticker", "Insider Name"]):
-        # Check if this is the only buy in our dataset (proxy for first in 12m)
-        all_buys_for_insider = df[
-            (df["Ticker"] == ticker) &
-            (df["Insider Name"] == insider) &
-            (df["Trade Type"] == "Buy")
-        ]
-        
-        if len(all_buys_for_insider) == 1:
-            row = group.iloc[0]
-            company_name = row.get("Company Name", ticker)
-            
-            alert = InsiderAlert(
-                signal_type="First Buy in 12 Months",
-                ticker=ticker,
-                company_name=company_name,
-                trades=pd.DataFrame([row]),
-                details={
-                    "insider": insider,
-                    "title": row.get("Title Normalized", row.get("Title", "Unknown")),
-                    "value": row["Value"],
-                    "trade_date": row["Trade Date"],
-                }
-            )
-            alerts.append(alert)
-    
-    logger.info(f"Detected {len(alerts)} first buy in 12 months signals")
-    return alerts
-
-
-def detect_bearish_cluster_selling(df: pd.DataFrame) -> List[InsiderAlert]:
-    """
-    Detect bearish cluster selling: ≥3 insiders from same ticker sell within cluster window,
-    total value ≥ MIN_BEARISH_CLUSTER_VALUE.
-    
-    Args:
-        df: Trades DataFrame
-        
-    Returns:
-        List of InsiderAlert objects
-    """
-    alerts = []
-    
-    # Filter to sales only
-    sales = df[df["Trade Type"] == "Sale"].copy()
-    
-    if sales.empty:
-        return alerts
-    
-    # Group by ticker
-    for ticker in sales["Ticker"].unique():
-        ticker_sales = sales[sales["Ticker"] == ticker].sort_values("Trade Date")
-        
-        # Check rolling window
-        for i, row in ticker_sales.iterrows():
-            window_start = row["Trade Date"] - timedelta(days=CLUSTER_DAYS)
-            window_end = row["Trade Date"]
-            
-            window_trades = ticker_sales[
-                (ticker_sales["Trade Date"] >= window_start) &
-                (ticker_sales["Trade Date"] <= window_end)
-            ]
-            
-            # Check if cluster criteria met (5+ insiders for higher confidence)
-            unique_insiders = window_trades["Insider Name"].nunique()
-            total_value = window_trades["Value"].sum()
-            
-            if unique_insiders >= MIN_CLUSTER_INSIDERS and total_value >= MIN_BEARISH_CLUSTER_VALUE:
-                company_name = window_trades["Company Name"].iloc[0] if "Company Name" in window_trades.columns else ticker
-                
-                alert = InsiderAlert(
-                    signal_type="Bearish Cluster Selling",
-                    ticker=ticker,
-                    company_name=company_name,
-                    trades=window_trades,
-                    details={
-                        "num_insiders": unique_insiders,
-                        "total_value": total_value,
-                        "window_days": CLUSTER_DAYS,
-                        "window_start": window_start,
-                        "window_end": window_end,
-                    }
-                )
-                alerts.append(alert)
-                break  # Only alert once per ticker
-    
-    logger.info(f"Detected {len(alerts)} bearish cluster selling signals")
-    return alerts
-
-
 def detect_strategic_investor_buy(df: pd.DataFrame) -> List[InsiderAlert]:
     """
     Detect Corporation Purchase: When a corporation (not an individual) buys stock.
@@ -2267,7 +2153,7 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
     Detect Elite Congressional Cluster Buy: 2+ Elite traders buy same ticker within 30 days.
     
     This is a HIGHLY filtered signal:
-    - ONLY tracks Top 15 proven Elite traders (ignores all other politicians)
+    - ONLY tracks Top 13 proven Elite traders (ignores all other politicians)
     - Requires 2+ Elite traders buying same stock (any trade size)
     - Party tracked only for "Bipartisan Elite Cluster" bonus (rare = extremely bullish)
     
@@ -2323,45 +2209,22 @@ def detect_congressional_cluster_buy(congressional_trades: List[Dict] = None) ->
                 has_rep = 'R' in parties
                 is_bipartisan = has_dem and has_rep
                 
-                # Get individual trades for this ticker cluster
-                # Check if issuer_id column exists (for backward compatibility)
-                cursor_info = conn.execute("PRAGMA table_info(congressional_trades)")
-                columns = [row[1] for row in cursor_info.fetchall()]
-                has_issuer_id = 'issuer_id' in columns
-                
-                if has_issuer_id:
-                    trade_query = """
-                        SELECT politician_name, politician_id, party, chamber, size_range, 
-                               traded_date, published_date, filed_after_days, price, company_name, issuer_id
-                        FROM congressional_trades
-                        WHERE ticker = ?
-                        AND trade_type = "BUY"
-                        AND published_date >= date("now", "-30 days")
-                        ORDER BY published_date DESC
-                    """
-                else:
-                    trade_query = """
-                        SELECT politician_name, politician_id, party, chamber, size_range, 
-                               traded_date, published_date, filed_after_days, price, company_name
-                        FROM congressional_trades
-                        WHERE ticker = ?
-                        AND trade_type = "BUY"
-                        AND published_date >= date("now", "-30 days")
-                        ORDER BY published_date DESC
-                    """
+                # Get individual trades for this ticker cluster (elite politicians only)
+                trade_query = """
+                    SELECT politician_name, politician_id, party, chamber, size_range, 
+                           traded_date, published_date, filed_after_days, price, company_name, issuer_id
+                    FROM congressional_trades
+                    WHERE ticker = ?
+                    AND trade_type = "BUY"
+                    AND published_date >= date("now", "-30 days")
+                    ORDER BY published_date DESC
+                """
                 trade_cursor = conn.execute(trade_query, (ticker,))
                 trades = trade_cursor.fetchall()
                 
-                # Get company_name from first trade
+                # Get company_name and issuer_id from first trade
                 company_name_from_db = trades[0]['company_name'] if trades and trades[0]['company_name'] else ticker
-                
-                # Get first issuer_id for linking (may not exist in older records)
-                first_issuer_id = None
-                if has_issuer_id and trades:
-                    try:
-                        first_issuer_id = trades[0]['issuer_id']
-                    except (KeyError, IndexError):
-                        pass
+                first_issuer_id = trades[0]['issuer_id'] if trades else None
                 
                 # Build DataFrame for display
                 trades_data = []
@@ -2413,7 +2276,7 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
     Detect Elite Large Congressional Buy: Elite trader purchases $100K+ in last 30 days.
     
     HIGHLY filtered signal:
-    - ONLY tracks Top 15 proven Elite traders (ignores all other politicians)
+    - ONLY tracks Top 13 proven Elite traders (ignores all other politicians)
     - Minimum $100K purchase size (100K-250K, 250K-500K, 500K-1M, 1M-5M, etc.)
     - Published within last 30 days
     
@@ -2432,43 +2295,21 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
         
         # Query database for Elite large buys (last 30 days by published_date, size ≥$100K)
         with get_db() as conn:
-            # Check if issuer_id column exists (for backward compatibility)
-            cursor_info = conn.execute("PRAGMA table_info(congressional_trades)")
-            columns = [row[1] for row in cursor_info.fetchall()]
-            has_issuer_id = 'issuer_id' in columns
-            
-            if has_issuer_id:
-                query = f"""
-                    SELECT politician_name, politician_id, party, chamber, state,
-                           ticker, company_name, size_range, price,
-                           traded_date, published_date, filed_after_days, issuer_id
-                    FROM congressional_trades
-                    WHERE trade_type = "BUY"
-                    AND published_date >= date("now", "-30 days")
-                    AND filed_after_days <= ?
-                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
-                         OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
-                         OR size_range LIKE '%25M%' OR size_range LIKE '>%')
-                    AND ({elite_filter})
-                    ORDER BY published_date DESC
-                """
-                cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
-            else:
-                query = f"""
-                    SELECT politician_name, politician_id, party, chamber, state,
-                           ticker, company_name, size_range, price,
-                           traded_date, published_date, filed_after_days
-                    FROM congressional_trades
-                    WHERE trade_type = "BUY"
-                    AND published_date >= date("now", "-30 days")
-                    AND filed_after_days <= ?
-                    AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
-                         OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
-                         OR size_range LIKE '%25M%' OR size_range LIKE '>%')
-                    AND ({elite_filter})
-                    ORDER BY published_date DESC
-                """
-                cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
+            query = f"""
+                SELECT politician_name, politician_id, party, chamber, state,
+                       ticker, company_name, size_range, price,
+                       traded_date, published_date, filed_after_days, issuer_id
+                FROM congressional_trades
+                WHERE trade_type = "BUY"
+                AND published_date >= date("now", "-30 days")
+                AND filed_after_days <= ?
+                AND (size_range LIKE '%100K%' OR size_range LIKE '%250K%' OR size_range LIKE '%500K%' 
+                     OR size_range LIKE '%1M%' OR size_range LIKE '%5M%' 
+                     OR size_range LIKE '%25M%' OR size_range LIKE '>%')
+                AND ({elite_filter})
+                ORDER BY published_date DESC
+            """
+            cursor = conn.execute(query, (MAX_FILING_DELAY_DAYS,))
             large_buys = cursor.fetchall()
             
             for trade in large_buys:
@@ -2493,13 +2334,8 @@ def detect_large_congressional_buy(congressional_trades: List[Dict] = None) -> L
                 }]
                 trades_df = pd.DataFrame(trades_data)
                 
-                # Get issuer_id safely (may not exist in older records)
-                issuer_id_val = None
-                if has_issuer_id:
-                    try:
-                        issuer_id_val = trade['issuer_id']
-                    except (KeyError, IndexError):
-                        pass
+                # Get issuer_id directly (column always exists after init_database migration)
+                issuer_id_val = trade['issuer_id']
                 
                 alert = InsiderAlert(
                     signal_type="Congressional Buy",
@@ -2617,10 +2453,6 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     all_alerts.extend(detect_cluster_buying(df))
     all_alerts.extend(detect_ceo_cfo_buy(df))
     all_alerts.extend(detect_large_single_buy(df))
-    # REMOVED: First Buy in 12 Months signal (less reliable)
-    # all_alerts.extend(detect_first_buy_12m(df))
-    # Bearish Cluster Selling: disabled — noisy signal with high false-positive rate
-    # all_alerts.extend(detect_bearish_cluster_selling(df))
     all_alerts.extend(detect_strategic_investor_buy(df))
     
     # Congressional signals (if enabled)
@@ -2664,11 +2496,10 @@ def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
     1. Trinity Signal (3-source convergence)
     2. Cluster Buying (multiple insiders — strongest single-source)
     3. C-Suite Buy (executive conviction)
-    4. Congressional Cluster Buy (multiple politicians)
+    4. Congressional Cluster Buy (multiple elite politicians)
     5. Congressional Buy (single elite politician)
-    6. Corporation Purchase (strategic investor)
+    6. Corporation Purchase (strategic corporate investor)
     7. Large Single Buy (raw dollar amount, no title context)
-    8. Bearish Cluster Selling (sell signal)
     """
     if not alerts:
         return alerts
@@ -2680,11 +2511,8 @@ def deduplicate_alerts(alerts: List[InsiderAlert]) -> List[InsiderAlert]:
         'C-Suite Buy': 3,
         'Congressional Cluster Buy': 4,
         'Congressional Buy': 5,
-        'Large Congressional Buy': 5,
         'Corporation Purchase': 6,
         'Large Single Buy': 7,
-        'Bearish Cluster Selling': 8,
-        'Strategic Investor Buy': 9,
     }
     
     # Keep only the highest-priority signal per ticker
@@ -2875,7 +2703,6 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
         'Corporation Purchase': 5,         # Tier 2: Watchlist
         'Congressional Cluster Buy': 5,    # Tier 2: Validated — 61.2% WR, +2.6% 30d avg (2773 signals)
         'Congressional Buy': 4,            # Tier 2: Validated — ~57% WR, +1.6% 30d avg (baseline)
-        # Bearish Cluster Selling: removed — signal is too noisy, high false-positive rate
     }
     score += signal_type_scores.get(alert.signal_type, 3)
     
@@ -4877,13 +4704,12 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
             
             # Base scores by signal type (0-100)
             base_scores = {
-                'Congressional Cluster Buy': 95,      # Multiple politicians = policy signal
-                'Large Congressional Buy': 90,         # Single politician >$100K = high conviction
+                'Congressional Cluster Buy': 95,      # Multiple elite politicians = strong signal
+                'Congressional Buy': 90,               # Single elite politician >$100K
                 'C-Suite Buy': 85,                     # CEO/CFO/COO = strongest corporate signal
                 'Cluster Buying': 80,                  # 3+ insiders = coordinated buying
                 'Large Single Buy': 70,                # Single large purchase >$500K
                 'Corporation Purchase': 65,            # Strategic/institutional buying
-                'Strategic Investor Buy': 60           # Corporation buying
             }
             score += base_scores.get(alert.signal_type, 50)
             
@@ -4932,7 +4758,7 @@ def process_alerts(alerts: List[InsiderAlert], dry_run: bool = False, tracked_ti
                     score *= min(max(multiplier, 1.0), 1.8)  # Cap between 1.0x-1.8x
             
             # Congressional trades use size ranges (parse midpoint)
-            elif alert.signal_type in ['Congressional Cluster Buy', 'Large Congressional Buy']:
+            elif alert.signal_type in ['Congressional Cluster Buy', 'Congressional Buy']:
                 # Parse size range from trades (e.g., "100K-250K" -> 175K)
                 # Extract from alert.details if available, or from first trade
                 if not alert.trades.empty and 'Size Range' in alert.trades.columns:
