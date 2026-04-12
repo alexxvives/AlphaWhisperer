@@ -384,9 +384,30 @@ def init_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracked_ticker ON tracked_tickers(ticker)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_tracked_user ON tracked_tickers(user_id)")
         
+        # Email subscribers table (for /emailme Telegram command)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_subscribers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_email_sub_user ON email_subscribers(user_id)")
+        
         conn.commit()
     
     logger.info(f"Database initialized at {DB_FILE}")
+
+
+def get_email_subscribers() -> List[str]:
+    """Return all subscriber emails from DB (excludes ALERT_TO, which is always included)."""
+    try:
+        with get_db() as conn:
+            rows = conn.execute("SELECT email FROM email_subscribers").fetchall()
+            return [row['email'] for row in rows]
+    except Exception:
+        return []
 
 def is_alert_already_sent(alert_id: str) -> bool:
     """Check if an alert was already sent (and not expired)."""
@@ -3821,12 +3842,25 @@ def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, con
     is_congressional = "Congressional" in alert.signal_type
     
     if is_congressional:
-        # Capitol Trades: filter by numeric issuer ID (confirmed working URL format)
+        # Capitol Trades: filter by issuer + politician when available (single buy has politician_id)
+        from urllib.parse import quote as _url_quote
         _ct_issuer_id = alert.details.get("issuer_id") if alert.details else None
-        link_url = f"https://www.capitoltrades.com/trades?issuer={_ct_issuer_id}&pageSize=40" if _ct_issuer_id else "https://www.capitoltrades.com/trades"
+        _ct_politician_id = alert.details.get("politician_id") if alert.details else None
+        if _ct_issuer_id and _ct_politician_id:
+            link_url = f"https://www.capitoltrades.com/trades?issuer={_ct_issuer_id}&politician={_ct_politician_id}&pageSize=40"
+        elif _ct_issuer_id:
+            link_url = f"https://www.capitoltrades.com/trades?issuer={_ct_issuer_id}&pageSize=40"
+        else:
+            link_url = "https://www.capitoltrades.com/trades"
         links.append(f"[Capitol Trades]({link_url})")
     else:
-        oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
+        from urllib.parse import quote_plus as _qp
+        # Single-insider signals: filter by name so link shows only that person's trades
+        _oi_insider = (alert.details.get("insider") or alert.details.get("investor")) if alert.details else None
+        if _oi_insider:
+            oi_link = f"http://openinsider.com/screener?s={alert.ticker}&n={_qp(_oi_insider)}&xp=1&cnt=40"
+        else:
+            oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
         links.append(f"[OpenInsider]({oi_link})")
     
     if links:
@@ -4119,21 +4153,8 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
                 text = text.replace(char, f'\\{char}')
             return text
         
-        # Build message
+        # Build message (sent as personal DM — no @mentions needed)
         msg = f"📌 *TRACKED TICKER* 📌\n"
-        
-        # User mentions (right after title, no break line)
-        mentions = []
-        for user in tracking_users:
-            if user['username']:
-                mentions.append(f"@{user['username']}")
-            else:
-                user_id = user['user_id']
-                first_name = user['first_name'] or 'User'
-                mentions.append(f"[{first_name}](tg://user?id={user_id})")
-        
-        if mentions:
-            msg += f"by {', '.join(mentions)}\n\n"
         
         # Company name
         company_name = trades[0].get('company_name', ticker)
@@ -4281,17 +4302,16 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
         # Generate chart
         chart_buf = generate_stock_chart(ticker, days=180)
         
-        # Send via Telegram
-        chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(",")]
-        
-        async def send_message():
+        # Send as personal DM to each user who is tracking this ticker
+        async def send_dms():
             bot = Bot(token=TELEGRAM_BOT_TOKEN)
             success_count = 0
             
-            for chat_id in chat_ids:
+            for user in tracking_users:
+                user_dm_id = user['user_id']
                 try:
                     await bot.send_message(
-                        chat_id=chat_id,
+                        chat_id=user_dm_id,
                         text=msg,
                         parse_mode=ParseMode.MARKDOWN_V2,
                         disable_web_page_preview=True
@@ -4300,19 +4320,19 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
                     if chart_buf:
                         chart_buf.seek(0)
                         await bot.send_photo(
-                            chat_id=chat_id,
+                            chat_id=user_dm_id,
                             photo=chart_buf,
                             caption=f'{ticker} - Chart'
                         )
-                        logger.info(f"Chart sent to {chat_id}")
+                        logger.info(f"Chart sent to user {user_dm_id}")
                     
                     success_count += 1
                 except Exception as e:
-                    logger.error(f"Failed to send tracked ticker alert to {chat_id}: {e}")
+                    logger.error(f"Failed to send DM to user {user_dm_id}: {e}")
             
             return success_count
         
-        success_count = asyncio.run(send_message())
+        success_count = asyncio.run(send_dms())
         
         if success_count > 0:
             logger.info(f"Tracked ticker alert sent successfully: {ticker} ({len(trades)} trades, {len(tracking_users)} users)")
@@ -4529,25 +4549,22 @@ Next Step: The top 3 signals will be sent in separate detailed alert emails.
 """
     
     try:
-        # Create message
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_TO
+        # Build full recipient list (always include ALERT_TO + DB subscribers)
+        all_recipients = list({ALERT_TO} | set(get_email_subscribers()))
         
-        # Attach both versions
-        part1 = MIMEText(text_body, "plain")
-        part2 = MIMEText(html_body, "html")
-        msg.attach(part1)
-        msg.attach(part2)
-        
-        # Send email
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
+            for recipient in all_recipients:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = SMTP_USER
+                msg["To"] = recipient
+                msg.attach(MIMEText(text_body, "plain"))
+                msg.attach(MIMEText(html_body, "html"))
+                server.send_message(msg)
         
-        logger.info(f"Signal summary email sent successfully: {len(alerts)} signals")
+        logger.info(f"Signal summary email sent to {len(all_recipients)} recipients")
         return True
         
     except Exception as e:
@@ -4584,25 +4601,22 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         return True
     
     try:
-        # Create message
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = SMTP_USER
-        msg["To"] = ALERT_TO
+        # Build full recipient list (always include ALERT_TO + DB subscribers)
+        all_recipients = list({ALERT_TO} | set(get_email_subscribers()))
         
-        # Attach both plain text and HTML versions
-        part1 = MIMEText(text_body, "plain")
-        part2 = MIMEText(html_body, "html")
-        msg.attach(part1)
-        msg.attach(part2)
-        
-        # Send email
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
-            server.send_message(msg)
+            for recipient in all_recipients:
+                msg = MIMEMultipart("alternative")
+                msg["Subject"] = subject
+                msg["From"] = SMTP_USER
+                msg["To"] = recipient
+                msg.attach(MIMEText(text_body, "plain"))
+                msg.attach(MIMEText(html_body, "html"))
+                server.send_message(msg)
         
-        logger.info(f"Email sent successfully: {subject}")
+        logger.info(f"Email sent successfully to {len(all_recipients)} recipients: {subject}")
         
         # Mark as sent to prevent duplicates
         mark_alert_as_sent(alert.alert_id, alert.ticker, alert.signal_type)

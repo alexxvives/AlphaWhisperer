@@ -73,6 +73,16 @@ def init_tracking_db():
         )
     """)
     
+    # Email subscribers table (for /emailme command)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS email_subscribers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL UNIQUE,
+            email TEXT NOT NULL,
+            added_at TEXT NOT NULL
+        )
+    """)
+    
     conn.commit()
     conn.close()
     logger.info(f"Ticker tracking database initialized at {DB_FILE}")
@@ -171,6 +181,43 @@ def get_user_tickers(user_id: str) -> List[str]:
     return tickers
 
 
+def add_email_subscriber(user_id: str, email: str) -> bool:
+    """Subscribe a user to email alerts. Returns True if added, False if already subscribed."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO email_subscribers (user_id, email, added_at)
+            VALUES (?, ?, ?)
+        """, (user_id, email.lower().strip(), datetime.now().isoformat()))
+        conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        # Already subscribed — update their email in case it changed
+        cursor.execute("""
+            UPDATE email_subscribers SET email = ?, added_at = ? WHERE user_id = ?
+        """, (email.lower().strip(), datetime.now().isoformat(), user_id))
+        conn.commit()
+        return False
+    finally:
+        conn.close()
+
+
+def remove_email_subscriber(user_id: str) -> Optional[str]:
+    """Unsubscribe a user from email alerts. Returns the removed email or None."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT email FROM email_subscribers WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    if row:
+        cursor.execute("DELETE FROM email_subscribers WHERE user_id = ?", (user_id,))
+        conn.commit()
+        conn.close()
+        return row[0]
+    conn.close()
+    return None
+
+
 def send_message(chat_id: int, text: str) -> bool:
     """Send a message via Telegram API."""
     try:
@@ -205,6 +252,61 @@ def process_message(message: Dict) -> Optional[str]:
     
     # Log user info for debugging
     logger.info(f"Processing message from user_id={user_id}, username={username}, first_name={first_name}")
+    
+    # --- Slash commands (work in both DMs and groups) ---
+    
+    # /emailme email@example.com  — subscribe to email alerts
+    if re.match(r'^/emailme\b', text, re.IGNORECASE):
+        parts = text.strip().split()
+        if len(parts) < 2:
+            return "Usage: /emailme your@email.com"
+        email = parts[1].strip()
+        if not re.match(r'^[\w.+-]+@[\w-]+\.[\w.]+$', email):
+            return f"'{email}' doesn't look like a valid email address."
+        was_new = add_email_subscriber(user_id, email)
+        if was_new:
+            return f"\u2705 Subscribed! You'll receive signal alerts at {email}."
+        else:
+            return f"\u2139\ufe0f Email updated to {email}."
+    
+    # /unemailme  — unsubscribe from email alerts
+    if re.match(r'^/unemailme\b', text, re.IGNORECASE):
+        removed = remove_email_subscriber(user_id)
+        if removed:
+            return f"\u2705 Unsubscribed. {removed} will no longer receive alerts."
+        else:
+            return "You're not subscribed to email alerts."
+    
+    # /track TICKER  — slash-command style
+    m = re.match(r'^/track\s+\$?([A-Z]{1,5})$', text.strip(), re.IGNORECASE)
+    if m:
+        ticker = m.group(1).upper()
+        success = add_ticker_for_user(user_id, username, first_name, ticker)
+        if success:
+            return f"\u2705 Now tracking ${ticker}. I'll DM you whenever there's insider trading activity."
+        else:
+            return f"\u2139\ufe0f Already tracking ${ticker}."
+    
+    # /untrack TICKER  — slash-command style
+    m = re.match(r'^/untrack\s+\$?([A-Z]{1,5})$', text.strip(), re.IGNORECASE)
+    if m:
+        ticker = m.group(1).upper()
+        success = remove_ticker_for_user(user_id, ticker)
+        if success:
+            return f"\u2705 Stopped tracking ${ticker}."
+        else:
+            return f"You weren't tracking ${ticker}."
+    
+    # /list  — show tracked tickers
+    if re.match(r'^/list\b', text.strip(), re.IGNORECASE):
+        tickers = get_user_tickers(user_id)
+        if tickers:
+            ticker_list = ", ".join([f"${t}" for t in tickers])
+            return f"Your tracked tickers:\n{ticker_list}\n\nYou'll be DM'd on any insider trades for these."
+        else:
+            return "You're not tracking any tickers yet.\n\nUse /track MSFT to start."
+    
+    # --- @bot mention commands (legacy, group chat style) ---
     
     # Check if bot is mentioned
     if "@bot" not in text.lower():
