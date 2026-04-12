@@ -478,7 +478,7 @@ def get_ticker_trades_from_db(ticker: str, limit: int = 50) -> List[Dict]:
                     'published_date': row['published_date'],
                     'filed_after_days': str(row['filed_after_days']) if row['filed_after_days'] else "N/A",
                     'filed_after_days_numeric': row['filed_after_days'],
-                    'owner': row['owner_type'],
+                    'owner': None,  # owner_type not stored in DB schema
                     'date': row['published_date']  # Use published_date for signal detection
                 })
             
@@ -1072,238 +1072,7 @@ def scrape_all_congressional_trades_to_db(days: int = None, max_pages: int = 500
                 pass
 
 
-def get_congressional_trades_legacy(ticker: str = None) -> List[Dict]:
-    """
-    DEPRECATED: Old approach that scraped on-demand without database.
-    Kept for reference only.
-    """
-    if not USE_CAPITOL_TRADES:
-        return []
-    
-    trades = []
-    driver = None
-    
-    try:
-        from selenium import webdriver
-        from selenium.webdriver.chrome.service import Service
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from webdriver_manager.chrome import ChromeDriverManager
-        import time
-        
-        # Configure Chrome for headless mode (runs in background without window)
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        
-        # Initialize Chrome driver (webdriver-manager handles driver download automatically)
-        logger.info(f"Initializing Chrome WebDriver...")
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(15)
-        logger.info(f"Chrome WebDriver initialized successfully")
-        
-        # Visit trades page - filter by ticker if provided
-        if ticker:
-            url = f"https://www.capitoltrades.com/trades?txDate=all&pageSize=100&politician=all&asset={ticker}"
-            logger.info(f"Fetching Congressional trades for {ticker}...")
-        else:
-            url = "https://www.capitoltrades.com/trades"
-            logger.info(f"Fetching recent Congressional trades...")
-        driver.get(url)
-        
-        # Wait for page to load and JavaScript to render
-        time.sleep(4)
-        
-        # Get rendered HTML
-        page_source = driver.page_source
-        soup = BeautifulSoup(page_source, 'html.parser')
-        
-        # Find all table rows
-        all_rows = soup.find_all('tr')
-        
-        for row in all_rows:
-            try:
-                # Extract politician name from link
-                politician_link = row.find('a', href=lambda x: x and '/politicians/' in str(x))
-                if not politician_link:
-                    continue
-                
-                politician_name = politician_link.get_text(strip=True)
-                
-                # Get row text
-                row_text = row.get_text()
-                
-                # Extract party and chamber from row
-                party_chamber = ""
-                if 'Republican' in row_text:
-                    party_chamber = " (R)"
-                elif 'Democrat' in row_text:
-                    party_chamber = " (D)"
-                
-                if 'House' in row_text:
-                    party_chamber += "-House"
-                elif 'Senate' in row_text:
-                    party_chamber += "-Senate"
-                
-                # Determine transaction type
-                if 'buy' in row_text.lower() or 'purchase' in row_text.lower():
-                    trade_type = 'BUY'
-                elif 'sell' in row_text.lower() or 'sale' in row_text.lower():
-                    trade_type = 'SELL'
-                else:
-                    continue
-                
-                # Extract ticker symbol - look for issuer ticker span
-                ticker_found = None
-                import re
-                
-                # New structure: <span class="q-field issuer-ticker">GOOGL:US</span>
-                ticker_span = row.find('span', class_='issuer-ticker')
-                if ticker_span:
-                    ticker_text = ticker_span.get_text(strip=True)
-                    ticker_match = re.search(r'([A-Z]{1,5}):(?:US|NYSE|NASDAQ)', ticker_text)
-                    if ticker_match:
-                        ticker_found = ticker_match.group(1)
-                
-                # Fallback: Try finding it in the row text as "TICKER:US" pattern
-                if not ticker_found:
-                    row_text_full = row.get_text()
-                    ticker_match = re.search(r'\b([A-Z]{2,5}):US\b', row_text_full)
-                    if ticker_match:
-                        ticker_found = ticker_match.group(1)
-                
-                # Extract date, size (amount range), price, and additional fields from cells
-                cells = row.find_all('td')
-                date_str = "Recent"
-                published_date = None
-                traded_date = None
-                filed_after_days = None
-                owner_type = None
-                size_range = None
-                price = None
-                
-                import re
-                for cell in cells:
-                    cell_text = cell.get_text(strip=True)
-                    
-                    # Match date patterns like "30 Oct", "15 Nov"
-                    if any(month in cell_text for month in ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-                                                              'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']):
-                        # Extract date - could be published or traded
-                        match = re.search(r'(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec))', cell_text)
-                        if match:
-                            if not published_date:
-                                published_date = match.group(1)
-                            elif not traded_date:
-                                traded_date = match.group(1)
-                            date_str = match.group(1)  # Keep for backwards compatibility
-                    
-                    # Match "Filed After" days (e.g., "39 days", "4 days")
-                    filed_match = re.search(r'(\d+)\s*days?', cell_text)
-                    if filed_match and not filed_after_days:
-                        filed_after_days = filed_match.group(1)
-                    
-                    # Match Owner type (Joint, Child, Spouse, Undisclosed)
-                    if any(owner in cell_text for owner in ['Joint', 'Child', 'Spouse', 'Undisclosed']):
-                        if 'Joint' in cell_text:
-                            owner_type = 'Joint'
-                        elif 'Child' in cell_text:
-                            owner_type = 'Child'
-                        elif 'Spouse' in cell_text:
-                            owner_type = 'Spouse'
-                        elif 'Undisclosed' in cell_text:
-                            owner_type = 'Undisclosed'
-                    
-                    # Match size patterns like "1K-15K", "100K-250K", "15K-50K", "50K-100K"
-                    # Note: CapitolTrades uses en-dash (–) not regular hyphen (-)
-                    if not size_range:
-                        size_match = re.search(r'(\d+[KM][-–]\d+[KM])', cell_text, re.IGNORECASE)
-                        if size_match:
-                            size_range = size_match.group(1)
-                    
-                    # Match price patterns like "$66.69", "$148.21", "$110,589.00"
-                    if not price:
-                        price_match = re.search(r'\$(\d+(?:,\d+)?(?:\.\d{2})?)', cell_text)
-                        if price_match:
-                            price = price_match.group(0)
-                
-                trades.append({
-                    'politician': politician_name + party_chamber,
-                    'type': trade_type,
-                    'date': date_str,
-                    'ticker': ticker_found or 'N/A',
-                    'size': size_range,
-                    'price': price
-                })
-                
-            except Exception as e:
-                logger.debug(f"Could not parse row: {e}")
-                continue
-        
-        # Limit to 15 most recent
-        trades = trades[:15]
-        
-        if trades:
-            logger.info(f"Found {len(trades)} recent Congressional trades")
-        else:
-            logger.info(f"No Congressional trades found")
-        
-    except ImportError as e:
-        logger.error(f"Selenium not installed. Run: pip install selenium webdriver-manager")
-        logger.error(f"Error: {e}")
-    except Exception as e:
-        logger.warning(f"Could not fetch Congressional trades: {e}")
-        import traceback
-        logger.debug(traceback.format_exc())
-    finally:
-        # Always close browser
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
-    
-    return trades
-
-
-def get_insider_role_description(title: str) -> str:
-    """
-    Get detailed description of insider's role and significance.
-    
-    Args:
-        title: Insider's title
-        
-    Returns:
-        Description string
-    """
-    role_descriptions = {
-        "CEO": "Chief Executive Officer - Top decision maker, deeply familiar with company strategy and performance",
-        "CFO": "Chief Financial Officer - Manages finances, has deep insight into company's financial health",
-        "COO": "Chief Operating Officer - Oversees daily operations, understands operational performance",
-        "CTO": "Chief Technology Officer - Leads technology strategy, knows product roadmap",
-        "President": "Senior leader, often involved in strategic decisions and operations",
-        "Director": "Board member - Has fiduciary duty and access to confidential strategic information",
-        "VP": "Vice President - Senior executive with significant inside knowledge",
-        "10% Owner": "Large shareholder with substantial influence and privileged access to information",
-        "Officer": "Corporate officer with executive responsibilities and insider knowledge",
-        "Unknown": "Insider with access to material non-public information"
-    }
-    
-    title_normalized = title.upper()
-    
-    for key, description in role_descriptions.items():
-        if key.upper() in title_normalized:
-            return description
-    
-    return role_descriptions["Unknown"]
-
+# get_congressional_trades_legacy removed — DEPRECATED, replaced by DB-backed scrape_all_congressional_trades_to_db()
 
 def generate_ai_insight(alert: InsiderAlert, context: Dict, confidence: int) -> str:
     """
@@ -1457,8 +1226,11 @@ Rules:
             # Format section headers as bold HTML
             for header in ["[KEY INSIGHT]", "[CATALYSTS]", "[RISKS]", "[VERDICT]"]:
                 label = header.strip("[]")
-                insight = insight.replace(header, f"<br><strong>{label}</strong> ")
-            insight = insight.replace("**", "").lstrip("<br>")
+                insight = insight.replace(header, f"<br><strong>{label}:</strong> ")
+            insight = insight.replace("**", "")
+            # Remove leading <br> without stripping individual characters
+            if insight.startswith("<br>"):
+                insight = insight[4:]
             return insight
     except Exception as e:
         logger.warning(f"GitHub Models API failed for {alert.ticker}: {e}")
@@ -2847,7 +2619,8 @@ def detect_signals(df: pd.DataFrame) -> List[InsiderAlert]:
     all_alerts.extend(detect_large_single_buy(df))
     # REMOVED: First Buy in 12 Months signal (less reliable)
     # all_alerts.extend(detect_first_buy_12m(df))
-    all_alerts.extend(detect_bearish_cluster_selling(df))
+    # Bearish Cluster Selling: disabled — noisy signal with high false-positive rate
+    # all_alerts.extend(detect_bearish_cluster_selling(df))
     all_alerts.extend(detect_strategic_investor_buy(df))
     
     # Congressional signals (if enabled)
@@ -3086,16 +2859,23 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
     
     # 1. Signal Type Hierarchy (Tier 1 = core alertable, Tier 2 = watchlist only)
     # Tier 1 (>=7): Trinity, Cluster Buying, C-Suite Buy — these get alerted
-    # Tier 2 (<7): Corporation Purchase, Large Single Buy, Congressional, Bearish — watchlist/log only
+    # Tier 2 (<7): Corporation Purchase, Large Single Buy, Congressional — watchlist/log only
+    # Scores validated via backtest (Apr 2026):
+    #   Cluster Buying:          67% WR, +11.4% 30d avg  (corporate)
+    #   C-Suite Buy:             67% WR, +6.6%  30d avg  (corporate)
+    #   Large Single Buy:        62% WR, +7.0%  30d avg  (corporate)
+    #   Congressional Cluster:   61% WR, +2.6%  30d avg  (2773 signals, published-date entry)
+    #   Elite Politician Single: 68% WR, +4.4%  30d avg  (1406 signals, top 13 politicians)
+    #   All Congressional:       57% WR, +1.6%  30d avg  (baseline)
     signal_type_scores = {
-        'Trinity Signal': 10,              # Tier 1: Highest conviction (3-source convergence)
-        'Cluster Buying': 8,               # Tier 1: Strongest single-source signal
-        'C-Suite Buy': 7,                  # Tier 1: CEO/CFO direct conviction
-        'Congressional Cluster Buy': 6,    # Tier 2: Watchlist (unvalidated elite list)
-        'Congressional Buy': 5.5,          # Tier 2: Watchlist
+        'Trinity Signal': 12,              # Tier 1: Rare 3-source convergence — premium signal
+        'Cluster Buying': 10,              # Tier 1: BEST signal (67% WR, +11.4% 30d avg)
+        'C-Suite Buy': 7,                  # Tier 1: Good 30d (67% WR, +6.6%) but fades at 90d
+        'Large Single Buy': 6,             # Tier 1: Under-rated: +7% 30d avg, +11% 90d avg
         'Corporation Purchase': 5,         # Tier 2: Watchlist
-        'Large Single Buy': 4,             # Tier 2: Watchlist (no title context)
-        'Bearish Cluster Selling': 3,      # Tier 2: Watchlist (sell signals noisy)
+        'Congressional Cluster Buy': 5,    # Tier 2: Validated — 61.2% WR, +2.6% 30d avg (2773 signals)
+        'Congressional Buy': 4,            # Tier 2: Validated — ~57% WR, +1.6% 30d avg (baseline)
+        # Bearish Cluster Selling: removed — signal is too noisy, high false-positive rate
     }
     score += signal_type_scores.get(alert.signal_type, 3)
     
@@ -3177,13 +2957,14 @@ def calculate_composite_signal_score(alert: InsiderAlert, context: Optional[Dict
                 score *= 1.0                    # No penalty — high scrutiny = genuine signal
     
     # 6. Short Interest Adjustment
+    # context['short_interest'] is a decimal from yfinance (0.10 = 10%)
     if context and 'short_interest' in context:
         short_pct = context.get('short_interest', 0)
         if short_pct is not None:
-            if 5 <= short_pct < 15:
-                score += 1  # Potential squeeze
-            elif short_pct > 30:
-                score -= 2  # Very risky
+            if 0.05 <= short_pct < 0.15:
+                score += 1  # Potential squeeze (5-15%)
+            elif short_pct > 0.30:
+                score -= 2  # Very risky (>30%)
     
     # 7. Bipartisan Bonus
     if 'Bipartisan' in alert.signal_type:
@@ -3897,8 +3678,9 @@ def format_email_html(alert: InsiderAlert) -> str:
                 if pid and pid != "nan" and pid not in politician_ids:
                     politician_ids.append(pid)
         
-        # Filter by ticker — shows all congressional trades for this specific stock
-        link_url = f"https://www.capitoltrades.com/trades?pageSize=40&asset={alert.ticker}"
+        # Filter by issuer ID — numeric ID stored in DB, confirmed working URL format
+        _ct_issuer_id = alert.details.get("issuer_id") if alert.details else None
+        link_url = f"https://www.capitoltrades.com/trades?issuer={_ct_issuer_id}&pageSize=40" if _ct_issuer_id else "https://www.capitoltrades.com/trades"
         link_text = "View on Capitol Trades →"
     else:
         link_url = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
@@ -4104,16 +3886,16 @@ def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, con
     ticker_esc = escape_md(alert.ticker)
     score_bar = ""
     if composite_score > 0:
-        filled = min(int(composite_score / 20), 5)  # 0-100 → 0-5 blocks
+        filled = min(round(composite_score / 4), 5)  # 0-20 → 0-5 blocks
         score_bar = "🟩" * filled + "⬜" * (5 - filled)
     
-    msg = f"🚨 *{escape_md(alert.signal_type.upper())}*\n"
+    msg = f"*{escape_md(alert.signal_type.upper())}*\n"
     if alert.company_name != alert.ticker:
         msg += f"*{company_esc} \\(${ticker_esc}\\)*"
     else:
         msg += f"*${ticker_esc}*"
     if score_bar:
-        msg += f"  {score_bar} {escape_md(f'{composite_score:.0f}')}/100"
+        msg += f"  {score_bar} {escape_md(f'{composite_score:.1f}')}/20"
     msg += "\n"
     
     # Mention users who are tracking this ticker
@@ -4206,16 +3988,19 @@ def format_telegram_message(alert: InsiderAlert, composite_score: float = 0, con
         msg += f"  \\.\\.\\.\\+{remaining} more\n"
     
     # --- Links ---
+    # NOTE: In MarkdownV2, the URL inside [text](url) must NOT be backslash-escaped.
+    # Only the link label [text] goes through escape_md. Escaping the URL breaks parameters.
     links = []
     is_congressional = "Congressional" in alert.signal_type
     
     if is_congressional:
-        # Capitol Trades: search by ticker on issuers page (verified working)
-        link_url = f"https://www.capitoltrades.com/trades?pageSize=40&asset={alert.ticker}"
-        links.append(f"[Capitol Trades]({escape_md(link_url)})")
-    
-    oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
-    links.append(f"[OpenInsider]({escape_md(oi_link)})")
+        # Capitol Trades: filter by numeric issuer ID (confirmed working URL format)
+        _ct_issuer_id = alert.details.get("issuer_id") if alert.details else None
+        link_url = f"https://www.capitoltrades.com/trades?issuer={_ct_issuer_id}&pageSize=40" if _ct_issuer_id else "https://www.capitoltrades.com/trades"
+        links.append(f"[Capitol Trades]({link_url})")
+    else:
+        oi_link = f"http://openinsider.com/screener?s={alert.ticker}&xp=1&daysago=30&cnt=40&page=1"
+        links.append(f"[OpenInsider]({oi_link})")
     
     if links:
         link_sep = ' \\| '
@@ -4378,94 +4163,7 @@ def generate_stock_chart(ticker: str, days: int = 180) -> BytesIO:
         return None
 
 
-def send_telegram_intro(signal_counts: dict, dry_run: bool = False) -> bool:
-    """Send intro message before sending individual alerts."""
-    if not USE_TELEGRAM or dry_run:
-        return False
-    
-    import random
-    
-    intros = [
-        "AlphaWhisperer reporting in… crunching numbers and organizing signals into something that looks civilized. Here's the rundown:",
-        "AlphaWhisperer online… signals sorted, noise filtered, sanity preserved. Here's what surfaced:",
-        "AlphaWhisperer checking in… scanning patterns and translating chaos into English. Here's the latest:",
-        "AlphaWhisperer activated… data reviewed, signals detected, confidence adjusted accordingly. Here's your update:",
-        "AlphaWhisperer speaking… algorithms agree this is worth your attention. Here's the batch:",
-        "AlphaWhisperer booted… charts inspected, signals wrangled, conclusions packaged. Here's what I've got:",
-        "AlphaWhisperer online… combing through the noise so you don't have to. Here's the breakdown:",
-        "AlphaWhisperer checking logs… patterns confirmed, surprises noted, results incoming:",
-        "AlphaWhisperer ready… sorting real signals from market drama. Here's the update:",
-        "AlphaWhisperer transmitting… data aligned, indicators behaving, insights prepared. Here's what I found:",
-        "AlphaWhisperer engaged… noise filtered out, signals locked in. Here's the summary:",
-        "AlphaWhisperer reporting… analytics completed, signal cluster identified. Here's the output:",
-        "AlphaWhisperer back online… market murmurs analyzed and neatly packaged. Here's the latest batch:",
-        "AlphaWhisperer status: operational… signals classified and ready for review. Here's your feed:",
-        "AlphaWhisperer scanning complete… nothing exploded, which is a win. Here are the signals:",
-        "AlphaWhisperer initiating report… pattern recognition says these are worth a look. Here's the data:",
-        "AlphaWhisperer delivering… calculations done, anomalies labeled, insights queued. Here's what turned up:",
-        "AlphaWhisperer prepared… sifted the noise, kept the good stuff. Here's the report:",
-        "AlphaWhisperer transmitting analysis… the market whispered, I listened. Here's what came through:",
-        "AlphaWhisperer ready to brief… signals detected, logs parsed, summary loaded. Here you go:"
-    ]
-    
-    try:
-        import asyncio
-        from telegram import Bot
-        from telegram.constants import ParseMode
-        
-        # Support multiple chat IDs
-        chat_ids = [cid.strip() for cid in TELEGRAM_CHAT_ID.split(",")]
-        
-        # Build intro message
-        intro_text = random.choice(intros)
-        intro_text += "\n\n"
-        
-        # Add signal counts (show all, including 0 for Congressional signals)
-        for signal_type, count in signal_counts.items():
-            intro_text += f"• {signal_type}: {count}\n"
-        
-        # Escape markdown special characters
-        def escape_md(text):
-            chars_to_escape = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
-            for char in chars_to_escape:
-                text = text.replace(char, f'\\{char}')
-            return text
-        
-        intro_text = escape_md(intro_text)
-        
-        # Send via Telegram Bot API
-        async def send_intro():
-            bot = Bot(token=TELEGRAM_BOT_TOKEN)
-            success_count = 0
-            
-            for chat_id in chat_ids:
-                try:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=intro_text,
-                        parse_mode=ParseMode.MARKDOWN_V2,
-                        disable_web_page_preview=True
-                    )
-                    success_count += 1
-                except Exception as e:
-                    logger.error(f"Failed to send intro to chat_id {chat_id}: {e}")
-            
-            return success_count
-        
-        # Run async function
-        success_count = asyncio.run(send_intro())
-        
-        if success_count > 0:
-            logger.info(f"Telegram intro sent successfully to {success_count}/{len(chat_ids)} accounts")
-            return True
-        else:
-            logger.error("Failed to send Telegram intro to any account")
-            return False
-    
-    except Exception as e:
-        logger.error(f"Failed to send Telegram intro: {e}")
-        return False
-
+# send_telegram_intro removed — was never called anywhere in the pipeline
 
 def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
     """Send Telegram alert via Bot API to one or more accounts."""
@@ -4503,6 +4201,11 @@ def send_telegram_alert(alert: InsiderAlert, dry_run: bool = False) -> bool:
             ai_insight = ""
         
         message_text = format_telegram_message(alert, composite_score=composite_score, confidence=confidence_score, ai_insight=ai_insight)
+        
+        # Enforce Telegram 4096-char hard limit (truncate before sending to avoid API error)
+        MAX_TG_LENGTH = 4090
+        if len(message_text) > MAX_TG_LENGTH:
+            message_text = message_text[:MAX_TG_LENGTH] + "\\.\\.\\."
         
         # Generate chart image
         chart_buf = generate_stock_chart(alert.ticker, days=180)
@@ -4735,16 +4438,14 @@ def send_tracked_ticker_alert(ticker: str, tracking_users: List[Dict], trades: L
         msg += "\n"
         links = []
         if has_congressional:
-            # Build Capitol Trades link with all politician IDs (no ticker param - doesn't work)
+            # Build Capitol Trades link using numeric issuer_id (confirmed working URL format)
             congressional_trades = [t for t in sorted_trades if t.get('source') == 'Congressional']
-            politician_ids = list(set(t.get('politician_id') for t in congressional_trades if t.get('politician_id')))
-            capitol_link = f"https://www.capitoltrades.com/trades?pageSize=40&asset={ticker}"
-            capitol_link_esc = escape_md(capitol_link)
-            links.append(f"[View on Capitol Trades]({capitol_link_esc})")
+            _ct_issuer_id = next((t.get('issuer_id') for t in congressional_trades if t.get('issuer_id')), None)
+            capitol_link = f"https://www.capitoltrades.com/trades?issuer={_ct_issuer_id}&pageSize=40" if _ct_issuer_id else "https://www.capitoltrades.com/trades"
+            links.append(f"[View on Capitol Trades]({capitol_link})")
         if has_openinsider:
             oi_link = f"http://openinsider.com/screener?s={ticker}&xp=1&daysago=30&cnt=40&page=1"
-            oi_link_esc = escape_md(oi_link)
-            links.append(f"[View on OpenInsider]({oi_link_esc})")
+            links.append(f"[View on OpenInsider]({oi_link})")
         
         if links:
             separator = " \\| "
@@ -5044,7 +4745,7 @@ def send_email_alert(alert: InsiderAlert, dry_run: bool = False, subject_prefix:
         logger.info(f"Skipping duplicate alert: {alert.ticker} - {alert.signal_type} (already sent)")
         return False
     
-    subject = f"[Insider Whisper] {alert.signal_type}"
+    subject = f"{subject_prefix}[Insider Whisper] {alert.signal_type}"
     
     # Format email body
     text_body = format_email_text(alert)
