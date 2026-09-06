@@ -4,58 +4,107 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>BrainAI — Privacy Policy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet" />
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      font-family: Georgia, "Times New Roman", serif;
-      max-width: 40rem;
-      margin: 3rem auto;
-      padding: 0 1.25rem;
-      line-height: 1.55;
+    :root {
+      --ink: #1c1917;
+      --muted: #57534e;
+      --paper: #f5f0e8;
+      --card: #fffdf8;
+      --line: #e7e0d4;
+      --accent: #0f766e;
     }
-    h1 { font-size: 1.75rem; }
-    h2 { font-size: 1.15rem; margin-top: 1.75rem; }
-    a { color: inherit; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Source Sans 3", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, #dcebe8 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 100% 0%, #f0e6d8 0%, transparent 50%),
+        var(--paper);
+      line-height: 1.65;
+    }
+    main {
+      max-width: 40rem;
+      margin: 0 auto;
+      padding: 3.5rem 1.5rem 3rem;
+    }
+    h1 {
+      font-family: Fraunces, Georgia, serif;
+      font-weight: 650;
+      font-size: clamp(1.9rem, 5vw, 2.4rem);
+      letter-spacing: -0.02em;
+      margin: 0 0 0.35rem;
+    }
+    .meta { color: var(--muted); margin: 0 0 1.5rem; }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 1.5rem 1.45rem 1.2rem;
+      box-shadow: 0 10px 30px rgba(28, 25, 23, 0.04);
+    }
+    h2 {
+      font-family: Fraunces, Georgia, serif;
+      font-size: 1.15rem;
+      font-weight: 650;
+      margin: 1.4rem 0 0.45rem;
+    }
+    p, li { margin: 0 0 0.85rem; }
+    ul { margin: 0 0 0.85rem; padding-left: 1.2rem; }
+    a {
+      color: var(--accent);
+      font-weight: 600;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+    .back { display: inline-block; margin-top: 1.5rem; }
   </style>
 </head>
 <body>
-  <h1>BrainAI Privacy Policy</h1>
-  <p><em>Last updated: 6 September 2026</em></p>
+  <main>
+    <h1>Privacy Policy</h1>
+    <p class="meta">BrainAI · Last updated 6 September 2026</p>
+    <section class="panel">
+      <p>
+        BrainAI is a personal, self-hosted home automation project operated solely
+        by Alexandre Vives
+        (<a href="mailto:alexxvives@gmail.com">alexxvives@gmail.com</a>).
+        It is not a commercial service and has no other users.
+      </p>
 
-  <p>
-    BrainAI is a personal, self-hosted home automation project operated solely
-    by Alexandre Vives (<a href="mailto:alexxvives@gmail.com">alexxvives@gmail.com</a>).
-    It is not a commercial service and has no other users.
-  </p>
+      <h2>What data is accessed</h2>
+      <p>With the owner’s explicit Google account consent, BrainAI may read:</p>
+      <ul>
+        <li>Google Calendar events (daily calendar briefing)</li>
+        <li>Gmail unread mail / metadata (daily email digest)</li>
+      </ul>
 
-  <h2>What data is accessed</h2>
-  <p>
-    With the owner’s explicit Google account consent, BrainAI may read:
-  </p>
-  <ul>
-    <li>Google Calendar events (to build a daily calendar briefing)</li>
-    <li>Gmail message metadata / unread mail (to build a daily email digest)</li>
-  </ul>
+      <h2>How data is used</h2>
+      <p>
+        Data is processed on the owner’s home server to generate short daily
+        summaries. Those summaries are sent only to the owner’s Telegram chat.
+        Data is not sold, shared with third parties, or used for advertising.
+      </p>
 
-  <h2>How data is used</h2>
-  <p>
-    Data is processed on the owner’s home server to generate short daily
-    summaries. Those summaries are sent only to the owner’s Telegram chat.
-    Data is not sold, shared with third parties, or used for advertising.
-  </p>
+      <h2>Storage</h2>
+      <p>
+        Temporary processing happens on the home server. Google account tokens are
+        stored in the owner’s self-hosted automation software (n8n). There is no
+        public user database.
+      </p>
 
-  <h2>Storage</h2>
-  <p>
-    Temporary processing happens on the home server. Google account tokens are
-    stored in the owner’s self-hosted automation software (n8n). No public
-    user database exists.
-  </p>
-
-  <h2>Contact</h2>
-  <p>
-    Questions: <a href="mailto:alexxvives@gmail.com">alexxvives@gmail.com</a>
-  </p>
-
-  <p><a href="index.html">← Back to BrainAI</a></p>
+      <h2>Contact</h2>
+      <p>
+        Questions:
+        <a href="mailto:alexxvives@gmail.com">alexxvives@gmail.com</a>
+      </p>
+    </section>
+    <a class="back" href="./index.html">← Back to BrainAI</a>
+  </main>
 </body>
 </html>

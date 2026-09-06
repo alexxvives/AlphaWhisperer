@@ -3,32 +3,87 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BrainAI — personal home automation</title>
+  <title>BrainAI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,650&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet" />
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      font-family: Georgia, "Times New Roman", serif;
-      max-width: 40rem;
-      margin: 3rem auto;
-      padding: 0 1.25rem;
-      line-height: 1.55;
+    :root {
+      --ink: #1c1917;
+      --muted: #57534e;
+      --paper: #f5f0e8;
+      --card: #fffdf8;
+      --line: #e7e0d4;
+      --accent: #0f766e;
     }
-    h1 { font-size: 1.75rem; margin-bottom: 0.35rem; }
-    .sub { opacity: 0.75; margin-bottom: 1.75rem; }
-    a { color: inherit; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Source Sans 3", system-ui, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, #dcebe8 0%, transparent 55%),
+        radial-gradient(ellipse 60% 40% at 100% 0%, #f0e6d8 0%, transparent 50%),
+        var(--paper);
+      line-height: 1.6;
+    }
+    main {
+      max-width: 38rem;
+      margin: 0 auto;
+      padding: 4.5rem 1.5rem 3rem;
+    }
+    .brand {
+      font-family: Fraunces, Georgia, serif;
+      font-weight: 650;
+      font-size: clamp(2.4rem, 6vw, 3.2rem);
+      letter-spacing: -0.03em;
+      line-height: 1.05;
+      margin: 0 0 0.4rem;
+    }
+    .tag {
+      color: var(--muted);
+      font-size: 1.05rem;
+      margin: 0 0 2rem;
+    }
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 1.35rem 1.4rem;
+      box-shadow: 0 10px 30px rgba(28, 25, 23, 0.04);
+    }
+    .panel p { margin: 0 0 0.9rem; }
+    .panel p:last-child { margin-bottom: 0; }
+    a {
+      color: var(--accent);
+      font-weight: 600;
+      text-decoration-thickness: 1px;
+      text-underline-offset: 3px;
+    }
+    footer {
+      margin-top: 2rem;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
   </style>
 </head>
 <body>
-  <h1>BrainAI</h1>
-  <p class="sub">Personal home automation for Alexandre Vives</p>
-  <p>
-    BrainAI is a private, self-hosted assistant that runs on a home server.
-    It is not a public product and is not offered to other users.
-  </p>
-  <p>
-    Google Calendar and Gmail access is used only so the owner’s daily digests
-    can be sent to their own Telegram account.
-  </p>
-  <p><a href="privacy.html">Privacy policy</a></p>
+  <main>
+    <h1 class="brand">BrainAI</h1>
+    <p class="tag">Personal home automation for Alexandre Vives</p>
+    <section class="panel">
+      <p>
+        BrainAI is a private, self-hosted assistant that runs on a home server.
+        It is not a public product and is not offered to other users.
+      </p>
+      <p>
+        Google Calendar and Gmail access is used only so daily digests can be
+        sent to the owner’s own Telegram account.
+      </p>
+      <p><a href="./privacy.html">Privacy policy</a></p>
+    </section>
+    <footer>Contact: alexxvives@gmail.com</footer>
+  </main>
 </body>
 </html>
